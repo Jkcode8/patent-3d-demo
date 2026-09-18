@@ -1,0 +1,42 @@
+# 行尾统一：仓库内与检出后一律 LF。
+# 此前 Windows 上 core.autocrlf=true 会把工作区的 CRLF 反复"改回"LF，
+# 于是每次提交都刷一串 CRLF 警告 —— 显式声明后这类噪声消失。
+* text=auto eol=lf
+
+# 文本类（明确指定，便于 CAD/OpenSCAD 等外部工具按原样读取）
+*.py     text eol=lf
+*.ps1    text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.json   text eol=lf
+*.md     text eol=lf
+*.txt    text eol=lf
+*.csv    text eol=lf
+*.scad   text eol=lf
+# DXF 是 ASCII 文本格式；线稿产物直接进 AutoCAD，行尾保持 LF 干净一致
+*.dxf    text eol=lf
+*.svg    text eol=lf
+
+# 二进制资源：不做行尾转换、不参与 diff，也不让语言统计把它们当代码
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.bmp    binary
+*.tif    binary
+*.webp   binary
+*.mp3    binary
+*.wav    binary
+*.mp4    binary
+*.stl    binary
+*.3mf    binary
+*.zip    binary
+*.pdf    binary
+*.doc    binary
+*.docx   binary
+*.ttc    binary
+
+# 生成物/样例产物：GitHub 语言统计里不再计入
+assets/example_simple/expected/** linguist-generated=true
+cases/**/figures/**             linguist-generated=true
+*.dxf                           linguist-generated=true

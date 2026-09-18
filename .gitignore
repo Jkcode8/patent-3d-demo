@@ -6,6 +6,7 @@ __pycache__/
 Thumbs.db
 # 运行产物（示例的期望产出除外）
 _extract/
+figures/核对/
 video/frames/
 video/captioned/
 video/audio/
