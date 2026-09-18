@@ -130,6 +130,24 @@ def pick_sapi_voice(settings: dict, gender: str, available: list[str]) -> str | 
     return available[0] if available else None
 
 
+def cue_slots(durations: list[float]) -> dict:
+    """Lay the cues out on the timeline: one after another, never overlapping.
+
+    Each cue starts ``GAP_SECONDS`` after the previous one ended, and the whole
+    segment keeps ``TAIL_SECONDS`` of silence so the last caption stays readable.
+    Kept separate from the TTS loop so the arithmetic is unit-testable without
+    any audio engine.
+    """
+    starts: list[float] = []
+    cursor = 0.0
+    for duration in durations:
+        starts.append(round(cursor, 3))
+        cursor += duration + GAP_SECONDS
+    ends = [round(starts[i] + durations[i], 3) for i in range(len(durations))]
+    total = round((ends[-1] if ends else 0.0) + TAIL_SECONDS, 3)
+    return {"starts": starts, "ends": ends, "total": total}
+
+
 def tts_edge(text: str, target: Path, voice: str, rate: int) -> None:
     subprocess.run([sys.executable, "-m", "edge_tts", "--voice", voice,
                     f"--rate={rate:+d}%", "--text", text, "--write-media", str(target)],
@@ -193,12 +211,8 @@ def cmd_tts(args) -> int:
             else:
                 tts_sapi(spoken, target, pick_sapi_voice(settings, gender, deps["sapi_voices"]), rate)
             durations.append(media_duration(target))
-        starts, cursor = [], 0.0
-        for duration in durations:
-            starts.append(round(cursor, 3))
-            cursor += duration + GAP_SECONDS
-        ends = [round(starts[i] + durations[i], 3) for i in range(len(durations))]
-        total = round((ends[-1] if ends else 0.0) + TAIL_SECONDS, 3)
+        slots = cue_slots(durations)
+        starts, ends, total = slots["starts"], slots["ends"], slots["total"]
         timeline[seg["id"]] = {
             "cues": cues, "durations": [round(d, 3) for d in durations],
             "spoken": spoken_lines, "language": language,

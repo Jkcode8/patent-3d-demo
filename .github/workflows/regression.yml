@@ -7,8 +7,25 @@ on:
   workflow_dispatch:
 
 jobs:
+  unit-tests:
+    name: 单元测试（纯函数，秒级）
+    # 不依赖 OpenSCAD/ffmpeg/TTS：先跑这一层，坏改动在几十秒内就暴露
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: 安装依赖（测试只用到 Pillow）
+        run: python -m pip install --quiet --upgrade pip pillow
+
+      - name: 运行单元测试
+        run: python -m unittest discover -s tests -t . -v
+
   example-regression:
     name: example_simple 回归
+    needs: unit-tests
     # 固定镜像版本，避免 ubuntu-latest 迁移时 OpenSCAD 包版本漂移；
     # 升级镜像时需重新验证 apt 的 openscad 版本与 --animate/--projection 行为
     runs-on: ubuntu-24.04
@@ -97,6 +114,26 @@ jobs:
           python scripts/make_figures.py /tmp/demo
           test -s /tmp/demo/figures/彩色附图/附图_彩色.png
 
+      - name: 模型与图纸叠合核对（同一模型的自投影必须吻合）
+        run: |
+          python scripts/verify_vs_drawing.py --model /tmp/demo/model/device.scad \
+            --drawing /tmp/demo/figures/黑白附图/device_front.dxf \
+            --out-dir /tmp/demo/figures/核对 --views front --json | tee /tmp/verify.json
+          jq -e '.ok == true and (.views[0].coverage_model >= 0.8) and (.views[0].aspect_error <= 0.02)' \
+            /tmp/verify.json > /dev/null
+          test -s /tmp/demo/figures/核对/核对_front.png
+
+      - name: 核对负向对照（拿正视图图纸核对俯视图，必须判不通过）
+        run: |
+          set +e
+          python scripts/verify_vs_drawing.py --model /tmp/demo/model/device.scad \
+            --drawing /tmp/demo/figures/黑白附图/device_front.dxf \
+            --out-dir /tmp/demo/figures/核对对照 --views top --json > /tmp/verify_bad.json
+          status=$?
+          set -e
+          test "$status" -ne 0
+          jq -e '.ok == false and (.views[0].aspect_error > 0.05)' /tmp/verify_bad.json > /dev/null
+
       - name: 机构参数校验（check_kinematics）
         run: |
           # 用示例几何做确定性回归：给定 θ/pull，套环位置与各构件拉压由几何解出
@@ -136,6 +173,7 @@ jobs:
 
   offline-film:
     name: 离线全链路成片（不依赖 TTS）
+    needs: unit-tests
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
