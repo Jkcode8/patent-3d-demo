@@ -47,6 +47,18 @@ ANGLES: dict[str, tuple[tuple[int, int, int], tuple[int, int, int]]] = {
     "back-left-top-iso": ((-80, 80, 80), (55, 0, 225)),
 }
 VIEWPORT_RE = re.compile(r"^\s*\$vp[tdr]\s*=.*$", re.MULTILINE)
+DEFAULT_CALL_RE = re.compile(r"^\s*device\(\)\s*;\s*$", re.MULTILINE)
+
+
+def inline_model(model: Path) -> str:
+    """Return the model source with its trailing default ``device();`` removed.
+
+    Templates and line-art wrappers inline the model and then drive ``device()``
+    themselves; a leftover top-level call draws geometry outside the projection
+    and triggers "Mixing 2D and 3D objects" in OpenSCAD.  Matching whole lines
+    (instead of the file tail) keeps working when the file ends with comments.
+    """
+    return DEFAULT_CALL_RE.sub("", model.read_text(encoding="utf-8"))
 
 
 def render_source(model: Path) -> tuple[Path, tempfile.TemporaryDirectory | None]:
@@ -117,6 +129,26 @@ def model_extent(model: Path, defines: dict[str, str], settings: dict) -> dict |
                    (box["min"][2] + box["max"][2]) / 2],
         "view_distance": round(max_dim * 3.1),
     }
+
+
+_EXTENT_CACHE: dict[str, dict] = {}
+
+
+def camera_defaults(model: Path, defines: dict[str, str], settings: dict) -> dict[str, str]:
+    """``-D`` defaults that frame *model* regardless of its size.
+
+    Templates ship with values tuned for large civil structures; a 1 m part
+    would render as a speck (and trip the blank-frame check).  Callers inject
+    these only when the storyboard does not override them.
+    """
+    key = str(model)
+    if key not in _EXTENT_CACHE:
+        _EXTENT_CACHE[key] = model_extent(model, defines, settings) or {}
+    extent = _EXTENT_CACHE[key]
+    if not extent:
+        return {}
+    return {"VPD": str(extent["view_distance"]),
+            "VPT_Z": str(round(extent["center"][2]))}
 
 
 def render_views(model: Path, out_dir: Path, angles: list[str], defines: dict[str, str],

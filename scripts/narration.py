@@ -40,6 +40,68 @@ FONT_REG = [r"C:\Windows\Fonts\msyh.ttc", "/System/Library/Fonts/PingFang.ttc",
 GAP_SECONDS = 0.35
 TAIL_SECONDS = 0.9
 
+# TTS 直接读原文会念歪："φ1500" "1.5m" "16+16+17度" "−2.26m" 等。
+# 字幕仍用原文，只有送去合成的那份做规范化。
+ZH_RULES: list[tuple[str, str]] = [
+    (r"(\d+(?:\.\d+)?)\s*\+\s*(\d+(?:\.\d+)?)\s*\+\s*(\d+(?:\.\d+)?)\s*度", r"\1度、\2度、\3度"),
+    (r"(\d+(?:\.\d+)?)\s*\+\s*(\d+(?:\.\d+)?)\s*\+\s*(\d+(?:\.\d+)?)", r"\1度、\2度、\3度"),
+    (r"φ\s*(\d+(?:\.\d+)?)", r"直径\1"),
+    (r"Φ\s*(\d+(?:\.\d+)?)", r"直径\1"),
+    (r"\bR\s*(\d+(?:\.\d+)?)", r"半径\1"),
+    (r"(\d+(?:\.\d+)?)\s*m³/s", r"\1立方米每秒"),
+    (r"(\d+(?:\.\d+)?)\s*m3/s", r"\1立方米每秒"),
+    (r"(\d+(?:\.\d+)?)\s*mm\b", r"\1毫米"),
+    (r"(\d+(?:\.\d+)?)\s*cm\b", r"\1厘米"),
+    (r"(\d+(?:\.\d+)?)\s*m\b", r"\1米"),
+    (r"(\d+(?:\.\d+)?)\s*kN\b", r"\1千牛"),
+    (r"(\d+(?:\.\d+)?)\s*kPa\b", r"\1千帕"),
+    (r"(\d+(?:\.\d+)?)\s*MPa\b", r"\1兆帕"),
+    (r"(\d+(?:\.\d+)?)\s*°C", r"\1摄氏度"),
+    (r"(\d+(?:\.\d+)?)\s*%", r"百分之\1"),
+    (r"(\d+(?:\.\d+)?)\s*°", r"\1度"),
+    (r"(?<=[\d出])[×xX](?=\d)", r"乘"),
+    (r"[−–—]", r"负"),
+    (r"[~～]", r"到"),
+    (r"[·•]", r"、"),
+]
+EN_RULES: list[tuple[str, str]] = [
+    (r"(\d+(?:\.\d+)?)\s*\+\s*(\d+(?:\.\d+)?)\s*\+\s*(\d+(?:\.\d+)?)\s*degrees?", r"\1, \2 and \3 degrees"),
+    (r"(\d+(?:\.\d+)?)\s*\+\s*(\d+(?:\.\d+)?)\s*\+\s*(\d+(?:\.\d+)?)", r"\1, \2 and \3 degrees"),
+    (r"[φΦ]\s*(\d+(?:\.\d+)?)", r"diameter \1"),
+    (r"\bR\s*(\d+(?:\.\d+)?)", r"radius \1"),
+    (r"(\d+(?:\.\d+)?)\s*m³/s", r"\1 cubic metres per second"),
+    (r"(\d+(?:\.\d+)?)\s*m3/s", r"\1 cubic metres per second"),
+    (r"(\d+(?:\.\d+)?)\s*mm\b", r"\1 millimetres"),
+    (r"(\d+(?:\.\d+)?)\s*m\b", r"\1 metres"),
+    (r"(\d+(?:\.\d+)?)\s*kN\b", r"\1 kilonewtons"),
+    (r"(\d+(?:\.\d+)?)\s*kPa\b", r"\1 kilopascals"),
+    (r"(\d+(?:\.\d+)?)\s*MPa\b", r"\1 megapascals"),
+    (r"(\d+(?:\.\d+)?)\s*%", r"\1 percent"),
+    (r"(\d+(?:\.\d+)?)\s*°", r"\1 degrees"),
+    (r"(?<=[\d])[×xX](?=\d)", r" by "),
+    (r"[−–—]", r"minus "),
+    (r"[~～]", r" to "),
+]
+
+
+def normalize_narration(text: str, language: str = "zh") -> str:
+    """Rewrite units and symbols so the synthesised speech reads naturally."""
+    rules = EN_RULES if language.lower().startswith("en") else ZH_RULES
+    result = text
+    for pattern, replacement in rules:
+        result = re.sub(pattern, replacement, result)
+    result = re.sub(r"\s{2,}", " ", result)
+    result = re.sub(r"\s+([，。、；：,.!?])", r"\1", result)   # 标点前的空格
+    return result.strip()
+
+
+def voice_for(settings: dict, gender: str, language: str) -> str:
+    """Pick the edge-tts voice for the requested gender and language."""
+    table = settings["edge_voice"]
+    if language.lower().startswith("en"):
+        return table.get(f"en-{gender}", table.get("en-female", "en-US-AriaNeural"))
+    return table.get(gender, table["female"])
+
 
 def load_font(candidates: list[str], size: int) -> ImageFont.FreeTypeFont:
     for path in candidates:
@@ -107,6 +169,9 @@ def cmd_tts(args) -> int:
     if engine is None:
         raise SystemExit("没有可用的语音引擎（edge-tts 需联网，或安装 SAPI 中文语音）")
     rate = int(settings["voice_rate"].get(gender, 12))
+    language = args.language or storyboard.get("language") or settings.get("language", "zh-CN")
+    if language.lower().startswith("en"):
+        rate = int(settings["voice_rate"].get(gender, 12)) + 2   # 英文略快一点更自然
     audio_dir = paths["video"] / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
     fps = settings["fps"]
@@ -117,13 +182,16 @@ def cmd_tts(args) -> int:
             continue
         cues = seg.get("narration") or []
         durations: list[float] = []
+        spoken_lines: list[str] = []
         for index, line in enumerate(cues):
             suffix = ".mp3" if engine == "edge" else ".wav"
             target = audio_dir / f"{seg['id']}_{index}{suffix}"
+            spoken = normalize_narration(line, language)
+            spoken_lines.append(spoken)
             if engine == "edge":
-                tts_edge(line, target, settings["edge_voice"][gender], rate)
+                tts_edge(spoken, target, voice_for(settings, gender, language), rate)
             else:
-                tts_sapi(line, target, pick_sapi_voice(settings, gender, deps["sapi_voices"]), rate)
+                tts_sapi(spoken, target, pick_sapi_voice(settings, gender, deps["sapi_voices"]), rate)
             durations.append(media_duration(target))
         starts, cursor = [], 0.0
         for duration in durations:
@@ -133,6 +201,7 @@ def cmd_tts(args) -> int:
         total = round((ends[-1] if ends else 0.0) + TAIL_SECONDS, 3)
         timeline[seg["id"]] = {
             "cues": cues, "durations": [round(d, 3) for d in durations],
+            "spoken": spoken_lines, "language": language,
             "starts": starts, "ends": ends, "total": total,
             "frames": int(round(total * fps)), "engine": engine, "voice": gender,
         }
@@ -283,6 +352,7 @@ def main() -> int:
     tts.add_argument("project")
     tts.add_argument("--voice", choices=["female", "male"], default=None)
     tts.add_argument("--engine", choices=["edge", "sapi"], default=None)
+    tts.add_argument("--language", default=None, help="zh-CN（默认）或 en-US")
 
     render = sub.add_parser("render")
     render.add_argument("project")

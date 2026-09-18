@@ -1,0 +1,184 @@
+name: regression
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  example-regression:
+    name: example_simple 回归
+    # 固定镜像版本，避免 ubuntu-latest 迁移时 OpenSCAD 包版本漂移；
+    # 升级镜像时需重新验证 apt 的 openscad 版本与 --animate/--projection 行为
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: 安装依赖（OpenSCAD / xvfb / ffmpeg / Python 库）
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openscad xvfb ffmpeg jq
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet numpy pillow ezdxf
+
+      - name: OpenSCAD 需要虚拟显示（Linux 上导出 PNG 依赖 OpenGL）
+        run: |
+          mkdir -p "$HOME/bin"
+          printf '#!/usr/bin/env bash\nexec xvfb-run -a /usr/bin/openscad "$@"\n' > "$HOME/bin/openscad"
+          chmod +x "$HOME/bin/openscad"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          echo "OPENSCAD_EXECUTABLE=$HOME/bin/openscad" >> "$GITHUB_ENV"
+
+      - name: 依赖自检
+        run: python scripts/config.py --check
+
+      - name: 技能结构校验（frontmatter / 命名）
+        run: python scripts/check_skill_md.py .
+
+      - name: 所有脚本语法检查
+        run: python -m compileall -q scripts assets/segments && echo "compileall OK"
+
+      - name: 搭建示例项目
+        run: |
+          mkdir -p /tmp/demo
+          cp -r assets/example_simple/. /tmp/demo/
+          python scripts/config.py init-project /tmp/demo > /dev/null
+
+      - name: 分镜门禁 + 校验
+        run: python scripts/storyboard.py check /tmp/demo --json | tee /tmp/check.json && jq -e '.render_allowed == true' /tmp/check.json > /dev/null
+
+      - name: 建模与 STL（断言流形）
+        run: |
+          python scripts/openscad_run.py --project /tmp/demo --model model/device.scad \
+            --out-dir /tmp/demo/figures --angles front,front-right-top-iso --build-stl --json > /tmp/build.json
+          jq -e '.build.ok == true and .build.is_manifold == true and .build.facets > 100' /tmp/build.json > /dev/null
+
+      - name: 渲染单段动画（断言非空白帧）
+        run: |
+          # CI 里不做 TTS（离线/易抖动），用固定帧数的时间轴专门回归"渲染 + 空白帧检测"
+          mkdir -p /tmp/demo/video
+          python - <<'PY'
+          import json, pathlib
+          pathlib.Path("/tmp/demo/video/timeline.json").write_text(json.dumps({
+              "turntable": {"cues": [], "starts": [], "ends": [], "total": 4.0,
+                            "frames": 40, "engine": "none", "voice": "female"}
+          }), encoding="utf-8")
+          PY
+          python scripts/storyboard.py render /tmp/demo --only turntable \
+            --allow-unconfirmed --json | tee /tmp/render.json
+          jq -e '.ok == true and (.segments[0].frames >= 30)' /tmp/render.json > /dev/null
+
+      - name: 帧缓存判据（改模型后必须重渲，不得复用旧帧）
+        run: |
+          echo "// cache invalidation probe" >> /tmp/demo/model/device.scad
+          python scripts/storyboard.py render /tmp/demo --only turntable \
+            --allow-unconfirmed --json | tee /tmp/render2.json
+          jq -e '.segments[0].status == "rendered"' /tmp/render2.json > /dev/null
+
+      - name: 8 类段落模板烟测（语法 + 真渲染 2 帧）
+        run: |
+          python scripts/check_templates.py /tmp/demo --frames 2 --render adjust --json \
+            | tee /tmp/templates.json
+          jq -e '.ok == true' /tmp/templates.json > /dev/null
+
+      - name: 黑白线稿与附图（断言非空：正视 / 剖切 / 爆炸）
+        run: |
+          python scripts/lineart.py --model /tmp/demo/model/device.scad \
+            --out-dir /tmp/demo/figures/黑白附图 --views front,top \
+            --formats svg,dxf,png --sections 1 --exploded 900 --json | tee /tmp/lineart.json
+          jq -e '.ok == true' /tmp/lineart.json > /dev/null
+          test -s /tmp/demo/figures/黑白附图/device_front.dxf
+          test -s /tmp/demo/figures/黑白附图/device_front_section1.dxf
+          test -s /tmp/demo/figures/黑白附图/device_front_exploded.png
+          python scripts/make_figures.py /tmp/demo
+          test -s /tmp/demo/figures/彩色附图/附图_彩色.png
+
+      - name: 机构参数校验（check_kinematics）
+        run: |
+          # 用示例几何做确定性回归：给定 θ/pull，套环位置与各构件拉压由几何解出
+          cat > /tmp/kin.json <<'JSON'
+          {
+            "hinge": [0, 0], "node_r": 800, "rod_z": 400,
+            "collar_up_z": 700, "collar_dn_z": 100, "anchor_z": 60,
+            "expected": {
+              "spring1": "stretch", "spring2": "stretch",
+              "spring3": "compress", "damper": "compress"
+            },
+            "sweep": {"theta": [-8], "pull": [90]}
+          }
+          JSON
+          python scripts/check_kinematics.py /tmp/kin.json --json | tee /tmp/kin_out.json
+          python - <<'PY'
+          import json
+          data = json.load(open("/tmp/kin_out.json", encoding="utf-8"))
+          assert data["matches"] == data["combinations"] > 0, data["rows"]
+          print("check_kinematics OK:", data["matches"], "of", data["combinations"])
+          PY
+
+      - name: 收集产物（供 artifact 上传）
+        if: always()
+        run: |
+          mkdir -p artifacts/figures
+          cp -r /tmp/demo/figures/. artifacts/figures/ 2>/dev/null || true
+          cp /tmp/*.json artifacts/ 2>/dev/null || true
+
+      - name: 上传回归产物
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: regression-artifacts
+          path: artifacts/**
+          if-no-files-found: warn
+
+  offline-film:
+    name: 离线全链路成片（不依赖 TTS）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openscad xvfb ffmpeg jq
+          python -m pip install --quiet numpy pillow ezdxf
+          mkdir -p "$HOME/bin"
+          printf '#!/usr/bin/env bash\nexec xvfb-run -a /usr/bin/openscad "$@"\n' > "$HOME/bin/openscad"
+          chmod +x "$HOME/bin/openscad"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          echo "OPENSCAD_EXECUTABLE=$HOME/bin/openscad" >> "$GITHUB_ENV"
+
+      - name: 示例项目 + 占位旁白（离线 stub）
+        run: |
+          mkdir -p /tmp/demo && cp -r assets/example_simple/. /tmp/demo/
+          python scripts/config.py init-project /tmp/demo > /dev/null
+          python scripts/make_stub_narration.py /tmp/demo
+
+      - name: 渲染 → 字幕 → 成片 → 自检不变量
+        run: |
+          python scripts/storyboard.py render /tmp/demo
+          python scripts/narration.py compose /tmp/demo
+          python scripts/final_film.py /tmp/demo --json | tee /tmp/film.json
+          jq -e '.ok == true and .checks.voice_ok == true and .checks.loudness_ok == true' /tmp/film.json > /dev/null
+          ffprobe -v error -show_entries format=duration -of csv=p=0 /tmp/demo/video/完整版.mp4
+
+      - name: 收集成片
+        if: always()
+        run: |
+          mkdir -p artifacts
+          cp /tmp/demo/video/完整版.mp4 artifacts/ 2>/dev/null || true
+          cp /tmp/demo/video/film_report.json artifacts/ 2>/dev/null || true
+
+      - name: 上传成片与自检报告
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: offline-film
+          path: artifacts/**
+          if-no-files-found: warn

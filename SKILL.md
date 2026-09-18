@@ -16,6 +16,9 @@ metadata:
 视频结构**不固定**：技能从交底书/图纸推导分镜草案，**确认后才渲染**；固化的是
 8 类段落模板、选段规则与分镜契约。
 
+脚本只依赖 OpenSCAD / ffmpeg / Python 库等通用工具，**不绑定某个智能体运行时**：
+Codex、Claude Code 或其他支持 skills 的智能体都可直接使用（`agents/openai.yaml` 仅为 Codex 的 UI 元数据）。
+
 ## 触发条件
 
 - 斜杠：`/专利三维演示`
@@ -78,6 +81,22 @@ python $SKILL/scripts/narration.py compose <项目>          # 字幕 + 分段 M
 python $SKILL/scripts/final_film.py  <项目> [--music <曲子>|--no-music]  # 片头尾+配乐+混音
 python $SKILL/scripts/make_delivery.py <项目>              # 说明.md + 交付清单
 ```
+
+## 可选增强
+
+| 需求 | 用法 |
+|---|---|
+| 英文/多语种配音 | `narration.py tts <项目> --language en-US`（声线自动切 `en-US-*`；字幕仍用原文） |
+| 数字与单位读法规范化 | 默认开启：`φ1500`→"直径1500"、`1.5m`→"1.5米"、`16+16+17度`→"16度、16度、17度"、`−2.26m`→"负2.26米"（只改送去合成的文本，字幕不变） |
+| 剖切轮廓线稿 | `lineart.py … --sections 2`（按模型高度均分切割，含外轮廓 + 剖切轮廓） |
+| 爆炸状态线稿 | `lineart.py … --exploded <分离量>` |
+| 图题与尺寸线 | `lineart.py` 默认给 PNG 加图题与总宽/总高标注（单位与模型一致） |
+| 模板烟测 | `check_templates.py <项目> --frames 2 --render adjust`（8 类模板逐个实例化 + 语法/渲染） |
+| 离线成片（无 TTS 环境） | `make_stub_narration.py <项目>` 生成占位旁白，再走 compose/final_film |
+| 技能结构自检 | `check_skill_md.py .`（frontmatter 只允许 name/description/license/allowed-tools/metadata） |
+
+**帧缓存**：`storyboard.py render` 把"实例化后的段落文件 + `-D` 参数 + 渲染设置"做哈希存入
+`video/frames/<id>/_cache.json`；模型或参数一变即重渲，避免复用旧帧（此前只比对帧数）。
 
 ## 8 类段落模板（`assets/segments/`）
 

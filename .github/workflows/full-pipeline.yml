@@ -1,0 +1,46 @@
+name: full-pipeline
+
+# 端到端（含 TTS 配音与配乐成片）耗时较长且依赖网络，按需或每周跑一次
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * 1"
+
+jobs:
+  narrated-film:
+    name: 示例端到端成片
+    # 固定镜像版本（同上：升级镜像需重验 OpenSCAD 版本）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: 依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openscad xvfb ffmpeg
+          python -m pip install --quiet numpy pillow ezdxf edge-tts
+          mkdir -p "$HOME/bin"
+          printf '#!/usr/bin/env bash\nexec xvfb-run -a /usr/bin/openscad "$@"\n' > "$HOME/bin/openscad"
+          chmod +x "$HOME/bin/openscad"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          echo "OPENSCAD_EXECUTABLE=$HOME/bin/openscad" >> "$GITHUB_ENV"
+      - name: 搭建示例
+        run: |
+          mkdir -p /tmp/demo && cp -r assets/example_simple/. /tmp/demo/
+          python scripts/config.py init-project /tmp/demo > /dev/null
+      - name: 旁白 → 渲染 → 字幕 → 成片（含自检不变量）
+        run: |
+          python scripts/narration.py tts /tmp/demo --voice female
+          python scripts/storyboard.py render /tmp/demo
+          python scripts/narration.py compose /tmp/demo
+          python scripts/final_film.py /tmp/demo --json | tee /tmp/film.json
+          jq -e '.ok == true and .checks.voice_ok == true and .checks.loudness_ok == true' /tmp/film.json > /dev/null
+      - name: 上传成片
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: example-film
+          path: |
+            /tmp/demo/video/完整版.mp4
+            /tmp/demo/video/film_report.json

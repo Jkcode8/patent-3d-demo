@@ -46,6 +46,8 @@ DEFAULTS: dict = {
     "edge_voice": {
         "female": "zh-CN-XiaoxiaoNeural",
         "male": "zh-CN-YunyangNeural",
+        "en-female": "en-US-AriaNeural",
+        "en-male": "en-US-GuyNeural",
     },
     "sapi_voice": {
         "female": ["Microsoft Xiaoxiao", "Microsoft Huihui", "Microsoft Yaoyao"],

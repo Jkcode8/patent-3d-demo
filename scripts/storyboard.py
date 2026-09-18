@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -50,6 +51,23 @@ TEMPLATES = {
     "param_sweep": "seg_param_sweep.scad",
     "comparison": "seg_comparison.scad",
 }
+CACHE_FILE = "_cache.json"
+
+
+def frame_fingerprint(source: Path, defines: dict, settings: dict) -> str:
+    """Hash everything that changes the rendered frames.
+
+    The instantiated segment file already contains the inlined model, so hashing
+    it covers model edits; defines, render size and tessellation settings cover
+    the rest.  Counting frames alone (the previous behaviour) silently reused
+    stale frames whenever a change did not alter the frame count.
+    """
+    digest = hashlib.sha1()
+    digest.update(source.read_bytes())
+    digest.update(json.dumps(defines, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+    digest.update(f"{settings['render_size']}|{settings['scad_fn']}|"
+                  f"{settings['scad_coil_seg']}".encode("utf-8"))
+    return digest.hexdigest()[:16]
 DEFAULT_NARRATION = {
     "turntable": ["这是本专利的{title}。", "装置由{parts}组成，整体结构如图所示。"],
     "explode": ["将各组成部分分解展示。", "{parts}依次装配，形成完整装置。"],
@@ -268,7 +286,6 @@ def cmd_render(args) -> int:
     settings = load_settings(paths["root"])
     seg_dir = paths["video"] / "segments"
     seg_dir.mkdir(parents=True, exist_ok=True)
-    extents: dict[str, dict] = {}          # 每个模型只量一次包围盒
     results = []
     for seg in storyboard["segments"]:
         if not seg.get("enabled", True):
@@ -291,8 +308,7 @@ def cmd_render(args) -> int:
             results.append({"id": seg["id"], "status": "failed",
                             "error": f"模板缺失 {template.name}"})
             continue
-        model_source = model.read_text(encoding="utf-8")
-        model_source = re.sub(r"\n\s*device\(\);\s*$", "\n", model_source)
+        model_source = openscad_run.inline_model(model)
         template_text = template.read_text(encoding="utf-8")
         template_text = re.sub(r"^\s*include\s*<@MODEL@>;\s*$", "", template_text,
                                flags=re.MULTILINE)
@@ -311,21 +327,24 @@ def cmd_render(args) -> int:
 
         # 机位随模型尺寸自适应：模板默认值是按大型构件给的，小模型会缩成一点
         if "VPD" not in defines and model.exists():
-            key = str(model)
-            if key not in extents:
-                extents[key] = openscad_run.model_extent(generated, defines, settings) or {}
-            extent = extents[key]
-            if extent:
-                defines.setdefault("VPD", str(extent["view_distance"]))
-                defines.setdefault("VPT_Z", str(round(extent["center"][2])))
+            for name, value in openscad_run.camera_defaults(generated, defines, settings).items():
+                defines.setdefault(name, value)
 
         if count:
+            fingerprint = frame_fingerprint(generated, defines, settings)
+            manifest = read_json(frames_dir / CACHE_FILE, {}) or {}
             cached = len(list(frames_dir.glob("*.png"))) if frames_dir.exists() else 0
-            if cached >= count and not args.force:
+            if (manifest.get("fingerprint") == fingerprint
+                    and manifest.get("frames") == count
+                    and cached >= count and not args.force):
                 results.append({"id": seg["id"], "frames": cached, "status": "cached"})
                 continue
             payload = openscad_run.render_views(generated, frames_dir, [], defines, settings,
                                                 animate=count)
+            if payload.get("ok"):
+                write_json(frames_dir / CACHE_FILE,
+                           {"fingerprint": fingerprint, "frames": count,
+                            "rendered_at": datetime.now().isoformat(timespec="seconds")})
         else:
             payload = {"ok": False, "error": "缺少时间轴（先运行 narration.py tts）"}
         results.append({"id": seg["id"], "status": "rendered" if payload.get("ok") else "failed",
