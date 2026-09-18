@@ -1,0 +1,64 @@
+{
+  "skill": "patent-3d-demo",
+  "version": "1.0.0",
+  "project": "示例：可调式护栏支架（脱敏）",
+  "title": "一种可调式护栏支架",
+  "subtitle": "三维演示动画",
+  "keywords": "参数化结构 · 高度可调 · 受力变形 · 装配顺序",
+  "confirmed": true,
+  "confirmed_at": "2026-09-18T00:00:00",
+  "voice": "female",
+  "intro": { "lines": ["一种可调式护栏支架，三维演示。"] },
+  "outro": {
+    "lines": [
+      "高度可调：套环沿立柱滑动，行程 350 mm",
+      "承载可靠：悬臂与斜撑形成稳定三角",
+      "复位方便：弹簧实现自动复位"
+    ]
+  },
+  "figures": {
+    "color_views": ["front-right-top-iso", "front", "top"],
+    "blackwhite": {
+      "mono_views": ["front-right-top-iso", "front"],
+      "lineart_views": ["front", "top", "side"]
+    }
+  },
+  "segments": [
+    {
+      "id": "turntable", "type": "turntable", "enabled": true,
+      "purpose": "整体展示", "template": "seg_turntable.scad",
+      "model": "model/device.scad",
+      "defines": {},
+      "camera": {},
+      "narration": ["这是本专利的可调式护栏支架。", "支架由底座、立柱、套环与悬臂组成。"],
+      "duration_hint": 12
+    },
+    {
+      "id": "explode", "type": "explode", "enabled": true,
+      "purpose": "组成分解", "template": "seg_explode.scad",
+      "model": "model/device.scad",
+      "defines": { "EXPLODE_MM": "900" },
+      "camera": {},
+      "narration": ["各组成部分分离展示。", "底座、立柱、套环、悬臂、斜撑与弹簧依次装配。"],
+      "duration_hint": 14
+    },
+    {
+      "id": "adjust", "type": "adjust", "enabled": true,
+      "purpose": "高度调节", "template": "seg_adjust.scad",
+      "model": "model/device.scad",
+      "defines": { "Z_LOW": "0", "Z_HIGH": "350" },
+      "camera": {},
+      "narration": ["套环可沿立柱上下滑动。", "调节行程三百五十毫米，适应不同高度需求。"],
+      "duration_hint": 14
+    },
+    {
+      "id": "load_case", "type": "load_case", "enabled": true,
+      "purpose": "受力变形", "template": "seg_load_case.scad",
+      "model": "model/device.scad",
+      "defines": { "THETA": "14", "PULL": "60" },
+      "camera": {},
+      "narration": ["受载时悬臂绕立柱转动。", "斜撑与弹簧协同受力，载荷消失后自动复位。"],
+      "duration_hint": 14
+    }
+  ]
+}

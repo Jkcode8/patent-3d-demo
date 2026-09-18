@@ -1,0 +1,4 @@
+interface:
+  display_name: "专利三维演示"
+  short_description: "把专利交底书与图纸做成三维模型、附图与配音演示视频的全流程"
+  default_prompt: "用 $patent-3d-demo 把这个专利做成三维模型与演示视频"

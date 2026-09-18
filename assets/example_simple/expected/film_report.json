@@ -1,0 +1,46 @@
+{
+  "film": "C:\\Users\\user\\AppData\\Local\\Temp\\p3d_example\\video\\完整版.mp4",
+  "seconds": 47.81,
+  "music": "内置合成铺底",
+  "parts": [
+    {
+      "part": "intro",
+      "seconds": 6.4,
+      "file": "00_intro.mp4"
+    },
+    {
+      "part": "turntable",
+      "seconds": 7.9,
+      "file": "01_turntable.mp4"
+    },
+    {
+      "part": "explode",
+      "seconds": 8.9,
+      "file": "02_explode.mp4"
+    },
+    {
+      "part": "adjust",
+      "seconds": 7.9,
+      "file": "03_adjust.mp4"
+    },
+    {
+      "part": "load_case",
+      "seconds": 8.4,
+      "file": "04_load_case.mp4"
+    },
+    {
+      "part": "outro",
+      "seconds": 8.3,
+      "file": "05_outro.mp4"
+    }
+  ],
+  "checks": {
+    "voice_db": -17.1,
+    "music_db": -37.3,
+    "voice_above_music_db": 20.3,
+    "integrated_lufs": -16.44,
+    "voice_ok": true,
+    "loudness_ok": true
+  },
+  "ok": true
+}
