@@ -1,6 +1,6 @@
 {
   "skill": "patent-3d-demo",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "note": "示例用低分辨率以便快速跑通：正式项目请用默认 1920×1440 / 20 fps",
   "render_size": "960,720",
   "fps": 10

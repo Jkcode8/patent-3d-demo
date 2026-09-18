@@ -4,7 +4,7 @@ description: "把专利交底书与 CAD 图纸做成参数化三维模型、彩�
 license: MIT
 allowed-tools: Read, Write, Edit, Grep, Glob, Bash
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
   short-description: "专利交底书/图纸 → 三维模型 + 附图 + 配音演示视频"
   argument-hint: "[项目目录，默认当前目录；或直接给交底书/图纸路径]"
   user-invocable: true
@@ -63,6 +63,9 @@ python $SKILL/scripts/render_sketch.py <项目>/_extract                # 图元
 #    产物：<项目>/model/device.scad（必须实现 device(theta,pull,water_z,step,explode,section)）
 python $SKILL/scripts/openscad_run.py --project <项目> --model model/device.scad \
        --out-dir figures --angles front,top,front-right-top-iso --build-stl --json
+#    建模自检：把模型正投影叠到原始图纸上核对比例/轮廓（强烈建议）
+python $SKILL/scripts/verify_vs_drawing.py --project <项目> --views front,top
+#    图纸在 原始资料/ 里会自动挑选；也可 --drawing 立面.dxf / --drawing-map front=…,top=…
 
 # ④ 分镜草案 → 用户确认（门禁，未确认不得渲染）
 python $SKILL/scripts/storyboard.py draft   <项目>     # → storyboard.json + 分镜.md
@@ -94,6 +97,9 @@ python $SKILL/scripts/make_delivery.py <项目>              # 说明.md + 交�
 | 模板烟测 | `check_templates.py <项目> --frames 2 --render adjust`（8 类模板逐个实例化 + 语法/渲染） |
 | 离线成片（无 TTS 环境） | `make_stub_narration.py <项目>` 生成占位旁白，再走 compose/final_film |
 | 技能结构自检 | `check_skill_md.py .`（frontmatter 只允许 name/description/license/allowed-tools/metadata） |
+| **模型↔图纸核对** | `verify_vs_drawing.py --project <项目> [--drawing 图.dxf] [--views front,top]` → 三栏比对图（原图｜模型投影｜叠加）+ `核对报告.json`（长宽比偏差 / 覆盖率 / IoU） |
+| 参数扫描/剖切线稿 | `lineart.py … --define SET_XXX=值`（参数已能真正生效，见 references/troubleshooting.md） |
+| **纯函数单元测试** | `python -m unittest discover -s tests -t .`（秒级；不需要 OpenSCAD/ffmpeg） |
 
 **帧缓存**：`storyboard.py render` 把"实例化后的段落文件 + `-D` 参数 + 渲染设置"做哈希存入
 `video/frames/<id>/_cache.json`；模型或参数一变即重渲，避免复用旧帧（此前只比对帧数）。
@@ -132,7 +138,9 @@ python $SKILL/scripts/make_delivery.py <项目>              # 说明.md + 交�
 - 每句配音时长 ≤ 其时间槽（防叠音）——时间轴由 TTS 实际时长生成，换声线用 `voice_fit.py` 对齐；
 - 成片中**人声高于纯配乐 ≥ 8 dB**（`final_film.py` 实测并写入 `film_report.json`）；
 - 整片响度 −16 LUFS ±1 LU；STL 流形；渲染图非空且角度齐全；
-- `storyboard.json` 中每段的 `type` 都有对应模板；**未确认分镜拒绝渲染**。
+- `storyboard.json` 中每段的 `type` 都有对应模板；**未确认分镜拒绝渲染**；
+- 模型正投影与原图的长宽比偏差 ≤ 6%、轮廓覆盖率 ≥ 60%（`verify_vs_drawing.py`，阈值可调）；
+- `SKILL.md` / `CHANGELOG.md` / `config.VERSION` 三处版本号一致（单元测试断言）。
 
 ## 参考文档（按需 Read）
 
@@ -158,4 +166,5 @@ python $SKILL/scripts/narration.py tts     /tmp/demo --voice female
 python $SKILL/scripts/storyboard.py render /tmp/demo
 python $SKILL/scripts/narration.py compose /tmp/demo
 python $SKILL/scripts/final_film.py        /tmp/demo
+python -m unittest discover -s tests -t .  # 纯函数单元测试（不用 OpenSCAD/ffmpeg）
 ```

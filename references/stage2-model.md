@@ -24,6 +24,9 @@ module device(theta = 0, pull = 0, water_z = 0, step = N_PARTS,
 - `theta/pull` 工况变形；`water_z` 调节/环境量；`step` 装配步序；`explode` 爆炸分离；`section` 半剖。
 - 参数覆盖约定：需要被 `param_sweep` 扫描的参数写成
   `P_x = is_undef(SET_P_X) ? 默认 : SET_P_X;`
+  这些 `SET_*` 值由实例化文件（`lineart.wrap_model` / `storyboard.instantiate_source`）
+  **写在模型源码之前**，不要只靠命令行 `-D`——OpenSCAD 的 `-D` 在顶层赋值之后才生效，
+  `is_undef()` 此时仍为真，参数会被默认值悄悄吃掉（见 `references/troubleshooting.md`）。
 - 精度覆盖：`$fn = is_undef(SET_FN) ? 64 : SET_FN;`、`coil_seg = is_undef(SET_COIL_SEG) ? 8 : ...`。
 - 单色：`colorize = is_undef(SET_MONO) ? true : !SET_MONO;`，统一用 `tint(C_xxx)` 上色。
 
@@ -38,4 +41,8 @@ module device(theta = 0, pull = 0, water_z = 0, step = N_PARTS,
 
 - `openscad_run.py --build-stl` 会返回面片数、包围盒与**流形**判定；非流形要查自交/重复面。
 - 逐段渲染前先跑一次整机静帧（`figures/`），确认构件齐全、比例合理。
+- **与图纸核对**：`verify_vs_drawing.py --project <项目> --views front,top` 把模型正投影与
+  原始图（DXF/SVG/PNG/JPG，自动取 `原始资料/` 里的第一张）按包围盒归一化后叠合，
+  输出三栏比对图与 `核对报告.json`（长宽比偏差、轮廓覆盖率、IoU）。比例画错、构件缺失/
+  多余会立刻暴露。它**不判断绝对尺寸**——带标注的数值仍需人工核对，报告里也写明这条前提。
 - 尺寸来源存疑的参数，写进交付说明的"假设清单"，并在图上用不同颜色/图例区分。

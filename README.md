@@ -20,7 +20,7 @@ Explaining a patent's structure, working principle and construction method with 
 | Stage | Output |
 |---|---|
 | ① Extract | disclosure text + embedded figures, CAD entities + text, drawing sheets as PNG views |
-| ② Model | parametric `.scad` with a fixed `device(theta, pull, water_z, step, explode, section)` interface, manifold STL |
+| ② Model | parametric `.scad` with a fixed `device(theta, pull, water_z, step, explode, section)` interface, manifold STL, plus an overlay check of the projection against the original drawing |
 | ③ Storyboard | segment plan derived from the disclosure, **confirmed by you before any rendering** |
 | ④ Figures | colour renders, monochrome renders, orthographic line art (SVG / **DXF** / PNG) + parameter table |
 | ⑤ Video | per-sentence TTS → timeline → subtitles → title cards → music with ducking → loudness normalised MP4 |
@@ -79,6 +79,10 @@ python $SKILL/scripts/make_figures.py       <project>
 python $SKILL/scripts/narration.py compose  <project>
 python $SKILL/scripts/final_film.py         <project>
 python $SKILL/scripts/make_delivery.py      <project>
+
+# self-checks
+python $SKILL/scripts/verify_vs_drawing.py  <project> --views front,top
+python -m unittest discover -s tests -t .                # pure helpers, no OpenSCAD/ffmpeg
 ```
 
 ## Repository layout
@@ -86,9 +90,12 @@ python $SKILL/scripts/make_delivery.py      <project>
 ```
 patent-3d-demo/
 ├── SKILL.md            entry point: triggers, six stages, deliverables, invariants
+├── CHANGELOG.md        version history (kept in sync with SKILL.md by a test)
+├── .gitattributes      LF everywhere, binary assets marked as such
 ├── agents/openai.yaml  UI metadata
 ├── references/         extraction / modelling / storyboard / figures / video / troubleshooting
-├── scripts/            14 scripts (extractors, renderer, storyboard, narration, film, checks)
+├── scripts/            21 scripts (extractors, renderer, storyboard, narration, film, checks)
+├── tests/              unit tests for the pure helpers (seconds, no external tools)
 ├── assets/             model skeleton · 8 segment templates · example_simple (with expected output)
 ├── cases/              real-world case study
 └── docs/images/        artwork used by this README
@@ -106,6 +113,8 @@ patent-3d-demo/
 | Template smoke test | `check_templates.py <project> --frames 2 --render adjust` (instantiates all 8 segment templates) |
 | Offline film (no TTS) | `make_stub_narration.py <project>` writes placeholder cues, then run compose / final_film |
 | Skill structure check | `check_skill_md.py .` (frontmatter limited to name/description/license/allowed-tools/metadata) |
+| **Model ↔ drawing check** | `verify_vs_drawing.py --project <project> [--drawing 立面.dxf] [--views front,top]` → three-panel sheet (drawing / projected model / overlay) plus `核对报告.json` with aspect-ratio error, outline coverage and IoU |
+| **Unit tests** | `python -m unittest discover -s tests -t .` — 35 tests, under a second, no OpenSCAD or ffmpeg needed |
 
 **Frame cache**: `storyboard.py render` hashes the instantiated segment file, the `-D` values and the render
 settings into `video/frames/<id>/_cache.json`, so a model or parameter change always re-renders — the previous
@@ -116,13 +125,16 @@ behaviour (comparing frame counts only) could silently reuse stale frames.
 The scripts assert instead of hoping: every narration line fits its time slot (no overlapping speech),
 voice sits ≥ 8 dB above the music bed, the film lands at −16 LUFS ±1, STL is manifold,
 **rendered frames are not blank** (a silent `include` failure once produced an all-white video),
-and rendering is refused while the storyboard is unconfirmed.
+rendering is refused while the storyboard is unconfirmed, the model's projection stays within 6 % of the
+drawing's aspect ratio with ≥ 60 % outline coverage, and `SKILL.md` / `CHANGELOG.md` / `config.VERSION`
+always agree.
 
 ## Example & CI
 
 `assets/example_simple/` is a fictional "adjustable guardrail bracket" with model, storyboard and expected
-output (film, figures, line-art DXF, self-check report). `regression.yml` rebuilds it on every push —
-including the blank-frame check — while `full-pipeline.yml` runs the narrated end-to-end film on demand.
+output (film, figures, line-art DXF, self-check report). `regression.yml` runs the unit tests, rebuilds it on
+every push — including the blank-frame check and the drawing overlay — while `full-pipeline.yml` runs the
+narrated end-to-end film on demand.
 
 ## Notes
 

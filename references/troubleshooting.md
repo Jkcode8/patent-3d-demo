@@ -72,3 +72,18 @@
 ## 字幕断行难看（行首出现「、」「，」）
 
 - 修法：断行优先在标点处（`narration.py: wrap_text` 已实现，标点处断行无惩罚）。
+
+## `-D SET_XXX=…` 不生效（参数像被忽略）
+
+- 症状：`lineart.py --define SET_BASE_L=2000`、`storyboard.py render` 里给的 `-D` 参数
+  渲染出来和默认值一模一样（导出的 DXF 字节级相同）。
+- 原因：**OpenSCAD 的 `-D` 在文件顶层赋值之后才生效**。模型里常见的写法
+  `BASE_L = is_undef(SET_BASE_L) ? 400 : SET_BASE_L;` 在这一刻 `is_undef()` 仍为真，
+  于是 `BASE_L` 被算成默认值 400；任何从它派生的量（含时序函数算出的中间量）都跟着错。
+  实测（OpenSCAD 2026.09）：只有「在几何表达式里直接引用该变量」或
+  「`-D` 覆盖文件自己也赋值的那个名字」才会看到新值。
+- 修法：把参数**写进实例化文件、放在模型源码之前**，不要只靠 `-D`。
+  本技能的 `lineart.wrap_model()` 与 `storyboard.instantiate_source()` 已经这么做
+  （`wrapper_defines()` 负责合并设置与用户参数），所以 `--define` 现在真的生效。
+- 自检：`lineart.py … --define SET_X=大值` 后对比 DXF 是否变化；模型侧不要写
+  `X = is_undef(SET_X) ? 默认 : SET_X;` 之外的二次派生后再期望 `-D` 生效。
