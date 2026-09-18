@@ -23,6 +23,7 @@ from pathlib import Path
 
 from config import (
     SEGMENTS,
+    VERSION,
     load_settings,
     project_paths,
     read_json,
@@ -52,6 +53,22 @@ TEMPLATES = {
     "comparison": "seg_comparison.scad",
 }
 CACHE_FILE = "_cache.json"
+
+
+def instantiate_source(template_name: str, model_name: str, model_source: str,
+                       template_text: str, defines: dict) -> str:
+    """Assemble one runnable segment file.
+
+    The parameter assignments go *before* the model source on purpose.  OpenSCAD
+    applies ``-D`` values after a file's top-level assignments, so a model that
+    derives a parameter from one — the usual
+    ``BASE_L = is_undef(SET_BASE_L) ? 400 : SET_BASE_L;`` idiom — never sees it
+    and silently keeps the fallback.  Written into the file, the fallback
+    expression and everything derived from it pick the value up.
+    """
+    preamble = "\n".join(f"{key} = {value};" for key, value in sorted(defines.items()))
+    return (f"// 由 {template_name} 实例化：模型 {model_name} 已内联\n"
+            f"{preamble}\n{model_source}\n/* ===== 段落驱动 ===== */\n{template_text}")
 
 
 def frame_fingerprint(source: Path, defines: dict, settings: dict) -> str:
@@ -148,7 +165,7 @@ def cmd_draft(args) -> int:
     segments = propose_segments(text, title)
     storyboard = {
         "skill": "patent-3d-demo",
-        "version": "1.0.0",
+        "version": VERSION,
         "project": str(paths["root"]),
         "title": title,
         "subtitle": "三维演示动画",
@@ -320,15 +337,21 @@ def cmd_render(args) -> int:
                 continue
             template_text = template_text.replace(
                 "@MODEL_B@", (paths["root"] / other).resolve().as_posix())
-        generated.write_text(
-            f"// 由 {template.name} 实例化：模型 {model.name} 已内联\n"
-            f"{model_source}\n/* ===== 段落驱动 ===== */\n{template_text}",
-            encoding="utf-8")
+        generated.write_text(instantiate_source(template.name, model.name, model_source,
+                                                template_text, defines), encoding="utf-8")
 
         # 机位随模型尺寸自适应：模板默认值是按大型构件给的，小模型会缩成一点
         if "VPD" not in defines and model.exists():
-            for name, value in openscad_run.camera_defaults(generated, defines, settings).items():
-                defines.setdefault(name, value)
+            cameras = {name: value
+                       for name, value in openscad_run.camera_defaults(generated, defines,
+                                                                       settings).items()
+                       if name not in defines}
+            if cameras:
+                defines.update(cameras)
+                # 相机默认值也是参数：重写一次，让它们走同一套"前置赋值"通道
+                generated.write_text(
+                    instantiate_source(template.name, model.name, model_source,
+                                       template_text, defines), encoding="utf-8")
 
         if count:
             fingerprint = frame_fingerprint(generated, defines, settings)

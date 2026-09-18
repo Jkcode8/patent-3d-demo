@@ -66,14 +66,15 @@ def wrap_model(model: Path, rotation: list[int], temp_dir: Path,
     The model source is inlined instead of included: OpenSCAD on this platform
     fails to open ``include`` targets whose path contains non-ASCII characters
     (while the same file works fine as the main file).
+
+    ``defines`` are written as assignments *before* the model source — see
+    :func:`wrapper_defines` for why they must not go on the command line.
     """
     from openscad_run import inline_model
 
     source = inline_model(model)
     wrapper = temp_dir / f"projected_{tag}.scad"
-    define_lines = "\n".join(
-        f"{key} = {value};" for key, value in defines.items() if not key.startswith("SET_")
-    )
+    define_lines = "\n".join(f"{key} = {value};" for key, value in sorted(defines.items()))
     call = "device()"
     if explode is not None:
         call = f"device(explode = {explode})"
@@ -91,6 +92,26 @@ def wrap_model(model: Path, rotation: list[int], temp_dir: Path,
         encoding="utf-8",
     )
     return wrapper
+
+
+def wrapper_defines(settings: dict, defines: dict[str, str] | None = None) -> dict[str, str]:
+    """Parameter values to write into a wrapper, bypassing OpenSCAD's ``-D``.
+
+    ``-D`` values are applied *after* a file's top-level assignments, so the
+    usual model idiom — ``BASE_L = is_undef(SET_BASE_L) ? 400 : SET_BASE_L;`` —
+    never sees them: ``is_undef()`` is true at that point and the fallback wins
+    (verified on OpenSCAD 2026.09; only a direct use inside the geometry, or a
+    ``-D`` that shadows a variable the file itself assigns, picks the value up).
+    Writing the assignments into the wrapper makes both the fallback expression
+    and anything derived from it see the requested values.
+    """
+    merged: dict[str, str] = {}
+    if settings:
+        merged["SET_FN"] = str(settings["scad_fn"])
+        merged["SET_COIL_SEG"] = str(settings["scad_coil_seg"])
+    for key, value in (defines or {}).items():
+        merged[key] = str(value)
+    return merged
 
 
 def svg_polylines(svg_path: Path) -> list[list[tuple[float, float]]]:
@@ -233,7 +254,8 @@ def main() -> int:
                 results.append({"view": view, "ok": False, "error": "未知视角"})
                 continue
             tag = f"{view}{job['suffix']}"
-            wrapper = wrap_model(model, rotation, temp_dir, defines, cut=job["cut"],
+            wrapper = wrap_model(model, rotation, temp_dir, wrapper_defines(settings, defines),
+                                 cut=job["cut"],
                                  cut_z=job["cut_z"], explode=job["explode"], tag=tag)
             entry = {"view": tag, "ok": False, "files": {}}
             # PNG 只能由 SVG 折线栅格化得到；把 png 交给 OpenSCAD 会导出一张彩色渲染图
@@ -242,9 +264,7 @@ def main() -> int:
                 vector_formats.append("svg")
             for fmt in vector_formats:
                 target = out_dir / f"{model.stem}_{tag}.{fmt}"
-                argv = ["-D", f"SET_FN={settings['scad_fn']}",
-                        "-D", f"SET_COIL_SEG={settings['scad_coil_seg']}",
-                        "-o", str(target), str(wrapper)]
+                argv = ["-o", str(target), str(wrapper)]
                 result = run_cli(openscad, argv, 600)
                 if result.returncode != 0 or not target.exists():
                     entry.update(ok=False,

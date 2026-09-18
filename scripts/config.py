@@ -27,6 +27,9 @@ from pathlib import Path
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 ASSETS = SKILL_ROOT / "assets"
 SEGMENTS = ASSETS / "segments"
+# 单一版本来源：SKILL.md 的 metadata.version、CHANGELOG.md 最新条目与本常量由
+# tests/test_units.py 强制一致，避免发版时漏改某一处。
+VERSION = "1.1.0"
 
 # ----------------------------------------------------------------- defaults
 DEFAULTS: dict = {
@@ -279,7 +282,8 @@ def init_project(root: str | Path) -> dict[str, Path]:
         (paths["video"] / sub).mkdir(parents=True, exist_ok=True)
     if not paths["config"].exists():
         paths["config"].write_text(
-            json.dumps({"skill": "patent-3d-demo", "version": "1.0.0"}, ensure_ascii=False, indent=2),
+            json.dumps({"skill": "patent-3d-demo", "version": VERSION},
+                       ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
     return paths
