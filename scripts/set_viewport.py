@@ -79,6 +79,8 @@ def set_preset(path: Path, preset: tuple[str, str, str]) -> None:
 
 
 def main() -> int:
+    from config import enable_utf8_stdout
+    enable_utf8_stdout()
     root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent
     working = root / "working"
     for name, preset in PRESETS.items():

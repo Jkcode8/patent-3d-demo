@@ -76,11 +76,11 @@ def wrap_model(model: Path, rotation: list[int], temp_dir: Path,
     both projections, OpenSCAD's SVG export keeps only the *last* one, so the
     section cut silently disappears behind the outline.
     """
-    from openscad_run import inline_model
+    from openscad_run import inline_model, param_preamble
 
     source = inline_model(model)
     wrapper = temp_dir / f"projected_{tag}.scad"
-    define_lines = "\n".join(f"{key} = {value};" for key, value in sorted(defines.items()))
+    define_lines = param_preamble(defines)
     call = "device()"
     if explode is not None:
         call = f"device(explode = {explode})"
@@ -301,6 +301,8 @@ def merge_dxf(target: Path, sources: list[Path]) -> None:
 
 
 def main() -> int:
+    from config import enable_utf8_stdout
+    enable_utf8_stdout()
     parser = argparse.ArgumentParser(description="黑白线稿（正投影）导出")
     parser.add_argument("--model", required=True)
     parser.add_argument("--out-dir", required=True)

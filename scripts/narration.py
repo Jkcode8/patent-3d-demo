@@ -359,6 +359,8 @@ def cmd_render(args) -> int:
 
 
 def main() -> int:
+    from config import enable_utf8_stdout
+    enable_utf8_stdout()
     parser = argparse.ArgumentParser(description="配音、字幕与分段视频")
     sub = parser.add_subparsers(dest="command", required=True)
 

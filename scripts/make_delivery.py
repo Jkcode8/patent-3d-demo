@@ -29,6 +29,8 @@ def describe_tree(root: Path, limit: int = 40) -> list[str]:
 
 
 def main() -> int:
+    from config import enable_utf8_stdout
+    enable_utf8_stdout()
     parser = argparse.ArgumentParser(description="生成交付说明")
     parser.add_argument("project")
     parser.add_argument("--json", action="store_true")

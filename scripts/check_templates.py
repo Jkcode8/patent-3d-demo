@@ -38,6 +38,8 @@ def instantiate(template: Path, model: Path, target: Path, defines: dict) -> str
 
 
 def main() -> int:
+    from config import enable_utf8_stdout
+    enable_utf8_stdout()
     parser = argparse.ArgumentParser(description="段落模板烟测")
     parser.add_argument("project")
     parser.add_argument("--frames", type=int, default=2)

@@ -197,6 +197,8 @@ def parse_views(spec: str) -> dict[str, tuple[float, float, float, float]]:
 
 
 def main() -> int:
+    from config import enable_utf8_stdout
+    enable_utf8_stdout()
     parser = argparse.ArgumentParser(description="CAD 图元 → 视图 PNG")
     parser.add_argument("extract_dir")
     parser.add_argument("--out", default=None, help="默认 <extract_dir>/views")

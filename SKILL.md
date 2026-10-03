@@ -4,7 +4,7 @@ description: "把专利交底书与 CAD 图纸做成参数化三维模型、彩�
 license: MIT
 allowed-tools: Read, Write, Edit, Grep, Glob, Bash
 metadata:
-  version: "1.4.1"
+  version: "1.5.0"
   short-description: "专利交底书/图纸 → 三维模型 + 附图 + 配音演示视频"
   argument-hint: "[项目目录，默认当前目录；或直接给交底书/图纸路径]"
   user-invocable: true
@@ -114,19 +114,15 @@ python $SKILL/scripts/make_delivery.py <项目>              # 说明.md + 交�
 | 机构特写视角 | 视角名 `front-right-top-iso-close`（同机位 2× 放大，`draft` 默认已列入彩色附图） |
 | 爆炸状态线稿 | `lineart.py … --exploded <分离量>` |
 | 图题与尺寸线 | `lineart.py` 默认给 PNG 加图题与总宽/总高标注（单位与模型一致） |
-| 机构连接断言 | `check_mechanism.py --model model/device.scad --config mechanism.json`（模型导出铰点函数，断言点在支臂线段上/杆长单调/长度范围） |
 | 模板烟测 | `check_templates.py <项目> --frames 2 --render adjust`（8 类模板逐个实例化 + 语法/渲染） |
 | 离线成片（无 TTS 环境） | `make_stub_narration.py <项目>` 生成占位旁白，再走 compose/final_film |
 | 技能结构自检 | `check_skill_md.py .`（frontmatter 只允许 name/description/license/allowed-tools/metadata） |
 | **模型↔图纸核对** | `verify_vs_drawing.py --project <项目> [--drawing 图.dxf] [--views front,top] [--view-defines 'front=SET_THETA=90'] [--crop-map 'front=0.05,0.1,0.95,0.85']` → 三栏比对图（原图｜模型投影｜叠加）+ `核对报告.json`（长宽比偏差 / 覆盖率 / IoU）。**v1.4 自动选图与定工况**：无 `--drawing-map` 时自动对多张候选图纸逐一核对取最优（干净视图优先）；可在 `<项目>/project.json` 写 `verify` 块固化每视图的 `drawing`/`defines`/`crop`，重跑无需再传参 |
+| **图纸标注 ↔ 模型参数数值核对** | `dim_check.py <项目> [--drawing 图.dxf] [--tol 0.01] [--strict]` → 把图纸上的标注值逐个对到模型参数上（单位归一到 mm，角度与"4×φ20"这类数量自动跳过）。叠合核对把两边都按包围盒归一化，**数字差十倍照样满分**；写错的尺寸只有这条能兜住。夹具见 `assets/example_dims/` |
 | **参数提案对比（发明人快迭代）** | `proposal_compare.py <项目> --inline '撑杆=SET_STRUT_L=11500;鱼腹=SET_CAMBER=6000'`（或写 `proposals.json`）→ 多组参数 × 桥/坝两状态并排渲染 `figures/提案对比/提案对比.png`，一次看多方案、减少来回反馈轮数 |
 | **DWG 无实例自动拉起** | `extract_dwg.ps1` 无运行 AutoCAD 时自动 `Start-Process acad.exe` 并等待 COM 注册（约 90s）；仍失败则明确提示改走 DXF/图片降级 |
 | **成片版本号 + 自动备份 + 耗时统计** | `final_film.py` 固定输出 `完整版.mp4`，重跑前把上一版自动备份为 `完整版_<skill版本>_<时间戳>.mp4`，`film_report.json` 记录 `skill_version`/`assemble_seconds`/`backup_of_previous`；`make_delivery.py` 把耗时写入 `说明.md` |
 | 参数扫描/剖切线稿 | `lineart.py … --define SET_XXX=值`（参数已能真正生效，见 references/troubleshooting.md） |
-| 建模快速预览 | `model_preview.py <模型> [--size 640,480] [--fn 12] [--watch]`（三视图秒出；--watch 改文件自动重渲） |
-| 图纸→建模骨架 | `sketch_to_skeleton.py <项目>` → `model/skeleton.json` + `.md`（部件/主视图/归一化位置/总体尺寸建议） |
-| 参数变更→尺寸验证 | `param_check.py <项目> --param SET_BASE_L=500` → 前后 bbox/体积对比 + 预览图；参数无效会告警 |
-| 装配干涉检查 | `check_interference.py <项目> [--theta 90] [--hit 0.35]`（按子模块 STL 包围盒两两比对，分高置信/贴靠两档；模型需实现 `group_only`） |
 | **纯函数单元测试** | `python -m unittest discover -s tests -t .`（秒级；不需要 OpenSCAD/ffmpeg） |
 
 **帧缓存**：`storyboard.py render` 把"实例化后的段落文件 + `-D` 参数 + 渲染设置"做哈希存入
@@ -163,7 +159,8 @@ python $SKILL/scripts/make_delivery.py <项目>              # 说明.md + 交�
 
 ## 脚本不变量（脚本自动断言，失败即报错）
 
-- 每句配音时长 ≤ 其时间槽（防叠音）——时间轴由 TTS 实际时长生成，换声线用 `voice_fit.py` 对齐；
+- 每句配音时长 ≤ 其时间槽（防叠音）——时间轴由 TTS 实际时长生成；换声线/换语种用
+  `narration.py tts <项目> --voice …`（或 `--language …`）重跑，槽位随之重算；
 - 成片中**人声高于纯配乐 ≥ 8 dB**（`final_film.py` 实测并写入 `film_report.json`）；
 - 整片响度 −16 LUFS ±1 LU；STL 流形；渲染图非空且角度齐全；
 - `storyboard.json` 中每段的 `type` 都有对应模板；**未确认分镜拒绝渲染**；
@@ -196,4 +193,10 @@ python $SKILL/scripts/storyboard.py render /tmp/demo
 python $SKILL/scripts/narration.py compose /tmp/demo
 python $SKILL/scripts/final_film.py        /tmp/demo
 python -m unittest discover -s tests -t .  # 纯函数单元测试（不用 OpenSCAD/ffmpeg）
+```
+
+另有 `assets/example_dims/` 一份「图纸标注 ↔ 模型参数」夹具（含手写最小 DXF）：
+
+```bash
+python $SKILL/scripts/dim_check.py assets/example_dims --strict   # 应通过
 ```

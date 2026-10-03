@@ -21,7 +21,23 @@ from pathlib import Path
 
 
 def _fmt(point) -> str:
-    values = [float(v) for v in point[:3]] if len(point) >= 3 else [float(point[0]), float(point[1]), 0.0]
+    """Format an XYZ point from either reader.
+
+    ezdxf hands out ``Vec3``; slicing it raises ``TypeError: slicing not
+    supported`` (it implements integer indexing only), which used to make every
+    TEXT/LINE/CIRCLE/ARC/INSERT entry fail with ``<error: slicing not
+    supported>`` — i.e. ``cad_text.txt`` was silently always empty whenever
+    ezdxf was installed.  Index instead of slice, and keep going for the plain
+    lists the minimal reader produces.
+    """
+    try:
+        values = [float(point[0]), float(point[1])]
+        try:
+            values.append(float(point[2]))
+        except (IndexError, TypeError, ValueError):
+            values.append(0.0)
+    except (IndexError, TypeError, ValueError):
+        return str(point)
     return "{0:.3f},{1:.3f},{2:.3f}".format(*values)
 
 
@@ -154,6 +170,8 @@ def write_outputs(result: dict, out_dir: Path) -> dict:
 
 
 def main() -> int:
+    from config import enable_utf8_stdout
+    enable_utf8_stdout()
     if len(sys.argv) < 3:
         print(__doc__)
         return 2

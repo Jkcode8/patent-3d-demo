@@ -57,6 +57,8 @@ def box_overlap(a: dict, b: dict) -> tuple[float, float]:
 
 
 def main() -> int:
+    from config import enable_utf8_stdout
+    enable_utf8_stdout()
     parser = argparse.ArgumentParser(description="按子模块导出 STL 并检测装配干涉（包围盒粗筛）")
     parser.add_argument("project")
     parser.add_argument("--theta", type=float, default=0,

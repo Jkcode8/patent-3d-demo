@@ -145,6 +145,8 @@ def extract_images(path: Path, out_dir: Path) -> list[Path]:
 
 
 def main() -> int:
+    from config import enable_utf8_stdout
+    enable_utf8_stdout()
     doc_path = Path(sys.argv[1])
     out_dir = Path(sys.argv[2])
     out_dir.mkdir(parents=True, exist_ok=True)

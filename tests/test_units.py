@@ -34,6 +34,8 @@ import check_interference  # noqa: E402
 import check_mechanism  # noqa: E402
 import check_templates  # noqa: E402
 import config  # noqa: E402
+import dim_check  # noqa: E402
+import extract_dxf  # noqa: E402
 import lineart  # noqa: E402
 import narration  # noqa: E402
 import openscad_run  # noqa: E402
@@ -488,6 +490,91 @@ class LineartTests(unittest.TestCase):
         self.assertEqual(tail, [])
 
 
+class DimCheckTests(unittest.TestCase):
+    """1.5.0：图纸标注 ↔ 模型参数 的数值核对（verify_vs_drawing 只看形状）。"""
+
+    def test_units_are_normalised_to_millimetres(self):
+        self.assertEqual(dim_check.normalize_length(1.5, "m"), 1500.0)
+        self.assertEqual(dim_check.normalize_length(12, "cm"), 120.0)
+        self.assertEqual(dim_check.normalize_length(900, None), 900.0)
+
+    def test_annotations_yield_lengths_and_skip_angles_and_counts(self):
+        values = dim_check.annotated_lengths([
+            "[Model] 0,0,0 :: 400",
+            "[Model] 0,0,0 :: φ80",
+            "[Model] 0,0,0 :: 4×φ20",     # 数量前缀不是长度
+            "[Model] 0,0,0 :: 45°",       # 角度不参与比对
+            "[Model] 0,0,0 :: 1.5m",
+        ])
+        self.assertEqual(sorted(value for value, _ in values), [20.0, 80.0, 400.0, 1500.0])
+
+    def test_model_lengths_skip_angles_and_tessellation(self):
+        source = (
+            "BASE_L = 400;                                  // 来源：图纸 400\n"
+            "POST_D = is_undef(SET_POST_D) ? 80 : SET_POST_D;\n"
+            "THETA_FROM = 0;\n"
+            "SET_FN = is_undef(SET_FN) ? 48 : SET_FN;\n"
+            "coil_seg = is_undef(SET_COIL_SEG) ? 6 : SET_COIL_SEG;\n"
+            "_HIDDEN = 5;\n"
+        )
+        found = dim_check.model_lengths(source)
+        self.assertEqual(found["BASE_L"], 400.0)
+        self.assertEqual(found["POST_D"], 80.0)     # 保护行里取回退值
+        for skipped in ("THETA_FROM", "SET_FN", "coil_seg", "_HIDDEN"):
+            self.assertNotIn(skipped, found)
+
+    def test_unmatched_annotation_is_reported(self):
+        report = dim_check.match_lengths({"POST_H": 900.0},
+                                         [(9000.0, "9000"), (900.0, "900")])
+        self.assertEqual([item["param"] for item in report["matched"]], ["POST_H"])
+        self.assertEqual([item["value"] for item in report["unmatched_annotations"]],
+                         [9000.0])
+        self.assertEqual(report["params_without_annotation"], [])
+
+    def test_fixture_project_matches_strict(self):
+        """assets/example_dims 的标注与参数一一对应（CI 跑的是同一条命令）。"""
+        root = ROOT / "assets" / "example_dims"
+        model = (root / "model" / "device.scad").read_text(encoding="utf-8")
+        report = dim_check.match_lengths(
+            dim_check.model_lengths(model),
+            dim_check.annotated_lengths(
+                dim_check.drawing_annotations(root / "原始资料" / "drawing.dxf")))
+        self.assertEqual(report["unmatched_annotations"], [])
+        self.assertEqual(len(report["matched"]), 5)
+
+
+class ExtractDxfFormatTests(unittest.TestCase):
+    """1.5.0：ezdxf 的 Vec3 不支持切片，曾让所有 TEXT 实体解析失败。"""
+
+    class Vec3:
+        """模拟 ezdxf.utils.Vec3：可整数索引与 len()，但切片抛 TypeError。"""
+
+        def __init__(self, *values):
+            self._values = values
+
+        def __len__(self):
+            return len(self._values)
+
+        def __getitem__(self, index):
+            if isinstance(index, slice):
+                raise TypeError("slicing not supported")
+            return self._values[index]
+
+    def test_fmt_accepts_vec3_and_plain_sequences(self):
+        self.assertEqual(extract_dxf._fmt(self.Vec3(1.0, 2.0, 3.0)), "1.000,2.000,3.000")
+        self.assertEqual(extract_dxf._fmt([1.0, 2.0, 3.0]), "1.000,2.000,3.000")
+        self.assertEqual(extract_dxf._fmt((1.0, 2.0)), "1.000,2.000,0.000")
+
+    def test_fixture_texts_are_read_with_ezdxf(self):
+        try:
+            import ezdxf  # noqa: F401
+        except ImportError:
+            self.skipTest("ezdxf 未安装")
+        result = extract_dxf.read_with_ezdxf(ROOT / "assets/example_dims/原始资料/drawing.dxf")
+        self.assertEqual(len(result["texts"]), 5)
+        self.assertEqual(result["geo"], [])       # 不该再出现 <error: …>
+
+
 class RenderGuardTests(unittest.TestCase):
     def test_is_blank_detects_empty_frames(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -785,6 +872,52 @@ class RepositoryInvariantTests(unittest.TestCase):
         self.assertTrue(referenced)
         missing = sorted(name for name in referenced if not (SCRIPTS / name).is_file())
         self.assertEqual(missing, [])
+
+    def test_skill_md_bare_script_names_exist(self):
+        """SKILL.md 里裸写的 ``xxx.py`` 也必须真的存在（voice_fit.py 就是这么漏掉的）。"""
+        text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        referenced = set(re.findall(r"(?<![\w/.-])([a-z][a-z0-9_]*\.(?:py|ps1))", text))
+        missing = sorted(name for name in referenced if not (SCRIPTS / name).is_file())
+        self.assertEqual(missing, [], "SKILL.md 引用了不存在的脚本")
+
+    def test_only_one_place_builds_the_parameter_preamble(self):
+        """1.5.0：参数前置赋值与保护行剥离必须只有一份实现。
+
+        v1.4.0 的空白帧与相机默认值回归都来自同一条规则被复制成多份、
+        副本漏掉了后来才加的步骤。这里用文本不变量把"复制"这件事本身挡住：
+        两处标记只允许出现在 openscad_run.py。
+
+        保护行的标记要求同时出现 ``is_undef\\(`` 与 ``{key}``：解析器（例如
+        dim_check 读模型参数）也会提到这个惯用法，但它不做参数替换，不算实现。
+        """
+        preamble_owners, guard_owners = [], []
+        for path in sorted(SCRIPTS.glob("*.py")):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if 'f"{key} = {value};"' in text:
+                preamble_owners.append(path.name)
+            if "is_undef\\(" in text and "{key}" in text:
+                guard_owners.append(path.name)
+        self.assertEqual(preamble_owners, ["openscad_run.py"],
+                         "参数前置赋值只能由 openscad_run.param_preamble 构造")
+        self.assertEqual(guard_owners, ["openscad_run.py"],
+                         "保护行剥离只能由 openscad_run.strip_param_guards 实现")
+
+    def test_every_cli_enables_utf8_stdout(self):
+        """1.5.0：每个 CLI 入口都必须先调 ``enable_utf8_stdout()``。
+
+        中文 Windows 下把输出重定向到文件/管道时用的是 GBK，脚本一打印
+        ✓/≥/→ 就抛 UnicodeEncodeError 并中断报告（CI 设了 PYTHONUTF8=1，
+        所以永远看不到这个问题）。
+        """
+        missing = []
+        for path in sorted(SCRIPTS.glob("*.py")):
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            for index, line in enumerate(lines):
+                if line.startswith("def main("):
+                    if "enable_utf8_stdout()" not in "\n".join(lines[index:index + 3]):
+                        missing.append(path.name)
+                    break
+        self.assertEqual(missing, [], "这些 CLI 入口没有先调用 enable_utf8_stdout()")
 
     def test_no_crlf_in_the_git_index(self):
         if shutil.which("git") is None:

@@ -50,6 +50,8 @@ def watch(model: Path, out_dir: Path, views: list[str], size: str,
 
 
 def main() -> int:
+    from config import enable_utf8_stdout
+    enable_utf8_stdout()
     parser = argparse.ArgumentParser(description="建模快速预览（低细分小图，--watch 自动重渲）")
     parser.add_argument("model", help=".scad 模型路径（可相对项目）")
     parser.add_argument("--out-dir", default=None, help="默认 <项目>/figures/_preview")

@@ -23,6 +23,46 @@ jobs:
       - name: 运行单元测试
         run: python -m unittest discover -s tests -t . -v
 
+  windows-smoke:
+    name: Windows 冒烟（编码 / PowerShell / 单元测试）
+    runs-on: windows-latest
+    timeout-minutes: 20
+    # 刻意不设 PYTHONUTF8：中文 Windows 的控制台与重定向默认是 GBK，脚本必须
+    # 自己 enable_utf8_stdout() 才能在打印 ✓/≥/→ 时不抛 UnicodeEncodeError。
+    # Linux 作业设了那个变量，所以这一类问题在那边永远看不见。
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: 安装依赖（单元测试只用 Pillow）
+        run: python -m pip install --quiet --upgrade pip pillow
+
+      - name: 运行单元测试（GBK 环境）
+        run: python -m unittest discover -s tests -t . -v
+
+      - name: 重定向输出不得崩（GBK 控制台 + 非 GBK 字符）
+        shell: pwsh
+        run: |
+          @'
+          {"hinge":[0,0],"node_r":800,"rod_z":400,"collar_up_z":700,"collar_dn_z":100,
+           "anchor_z":60,"expected":{"spring1":"stretch","spring2":"stretch",
+           "spring3":"compress","damper":"compress"},"sweep":{"theta":[-8],"pull":[90]}}
+          '@ | Set-Content -Path kin.json -Encoding utf8
+          python scripts/check_kinematics.py kin.json --json > kin_out.json
+          if ($LASTEXITCODE -ne 0) { throw "check_kinematics 在重定向输出下失败（编码防护失效？）" }
+          Get-Content kin_out.json -TotalCount 4
+
+      - name: extract_dwg.ps1 语法解析（只有 Windows 跑得到）
+        shell: pwsh
+        run: |
+          $tokens = $null; $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path scripts/extract_dwg.ps1).Path, [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Host $_ }
+              throw "extract_dwg.ps1 有语法错误"
+          }
+          Write-Host "extract_dwg.ps1 语法 OK（运行期需要 AutoCAD，本作业只保证不写坏）"
+
   example-regression:
     name: example_simple 回归
     needs: unit-tests
@@ -51,12 +91,18 @@ jobs:
           echo "OPENSCAD_EXECUTABLE=$HOME/bin/openscad" >> "$GITHUB_ENV"
 
       - name: 依赖自检
+        id: deps
+        continue-on-error: true
         run: python scripts/config.py --check
 
       - name: 技能结构校验（frontmatter / 命名）
+        id: skill_md
+        continue-on-error: true
         run: python scripts/check_skill_md.py .
 
       - name: 所有脚本语法检查
+        id: compile
+        continue-on-error: true
         run: python -m compileall -q scripts assets/segments && echo "compileall OK"
 
       - name: 搭建示例项目
@@ -66,15 +112,21 @@ jobs:
           python scripts/config.py init-project /tmp/demo > /dev/null
 
       - name: 分镜门禁 + 校验
+        id: gate
+        continue-on-error: true
         run: python scripts/storyboard.py check /tmp/demo --json | tee /tmp/check.json && jq -e '.render_allowed == true' /tmp/check.json > /dev/null
 
       - name: 建模与 STL（断言流形）
+        id: build
+        continue-on-error: true
         run: |
           python scripts/openscad_run.py --project /tmp/demo --model model/device.scad \
             --out-dir /tmp/demo/figures --angles front,front-right-top-iso --build-stl --json > /tmp/build.json
           jq -e '.build.ok == true and .build.is_manifold == true and .build.facets > 100' /tmp/build.json > /dev/null
 
       - name: 渲染单段动画（断言非空白帧）
+        id: render
+        continue-on-error: true
         run: |
           # CI 里不做 TTS（离线/易抖动），用固定帧数的时间轴专门回归"渲染 + 空白帧检测"
           mkdir -p /tmp/demo/video
@@ -90,6 +142,8 @@ jobs:
           jq -e '.ok == true and (.segments[0].frames >= 30)' /tmp/render.json > /dev/null
 
       - name: 帧缓存判据（改模型后必须重渲，不得复用旧帧）
+        id: cache
+        continue-on-error: true
         run: |
           echo "// cache invalidation probe" >> /tmp/demo/model/device.scad
           python scripts/storyboard.py render /tmp/demo --only turntable \
@@ -97,12 +151,16 @@ jobs:
           jq -e '.segments[0].status == "rendered"' /tmp/render2.json > /dev/null
 
       - name: 8 类段落模板烟测（语法 + 真渲染 2 帧）
+        id: templates
+        continue-on-error: true
         run: |
           python scripts/check_templates.py /tmp/demo --frames 2 --render adjust --json \
             | tee /tmp/templates.json
           jq -e '.ok == true' /tmp/templates.json > /dev/null
 
       - name: 黑白线稿与附图（断言非空：正视 / 剖切 / 爆炸）
+        id: lineart
+        continue-on-error: true
         run: |
           python scripts/lineart.py --model /tmp/demo/model/device.scad \
             --out-dir /tmp/demo/figures/黑白附图 --views front,top \
@@ -114,7 +172,18 @@ jobs:
           python scripts/make_figures.py /tmp/demo
           test -s /tmp/demo/figures/彩色附图/附图_彩色.png
 
+      # 这一条检查的是"数值对不对"——上面的叠合核对把两边都按包围盒归一化，
+      # 数字差十倍也照样满分，只有逐值比对才拦得住写错的尺寸
+      - name: 图纸标注 ↔ 模型参数 数值核对（dim_check）
+        id: dims
+        continue-on-error: true
+        run: |
+          python scripts/dim_check.py assets/example_dims --strict --json | tee /tmp/dims.json
+          jq -e '.ok == true and (.matched | length) == 5' /tmp/dims.json > /dev/null
+
       - name: 模型与图纸叠合核对（同一模型的自投影必须吻合）
+        id: verify
+        continue-on-error: true
         run: |
           python scripts/verify_vs_drawing.py --model /tmp/demo/model/device.scad \
             --drawing /tmp/demo/figures/黑白附图/device_front.dxf \
@@ -124,6 +193,8 @@ jobs:
           test -s /tmp/demo/figures/核对/核对_front.png
 
       - name: 核对负向对照（拿正视图图纸核对俯视图，必须判不通过）
+        id: verify_neg
+        continue-on-error: true
         run: |
           set +e
           python scripts/verify_vs_drawing.py --model /tmp/demo/model/device.scad \
@@ -135,6 +206,8 @@ jobs:
           jq -e '.ok == false and (.views[0].aspect_error > 0.05)' /tmp/verify_bad.json > /dev/null
 
       - name: 机构参数校验（check_kinematics）
+        id: kinematics
+        continue-on-error: true
         run: |
           # 用示例几何做确定性回归：给定 θ/pull，套环位置与各构件拉压由几何解出
           cat > /tmp/kin.json <<'JSON'
@@ -154,6 +227,33 @@ jobs:
           data = json.load(open("/tmp/kin_out.json", encoding="utf-8"))
           assert data["matches"] == data["combinations"] > 0, data["rows"]
           print("check_kinematics OK:", data["matches"], "of", data["combinations"])
+          PY
+
+      # 上面每条断言都挂了 continue-on-error，好让一次运行把问题暴露完；
+      # 这里统一收口：只要有一条没过，作业就以失败结束。
+      - name: 断言汇总（任一失败则作业失败，但所有步骤都已跑完）
+        if: always()
+        env:
+          STEPS_JSON: ${{ toJSON(steps) }}
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          outcomes = json.loads(os.environ["STEPS_JSON"])
+          print("断言步骤结果：")
+          for name, info in outcomes.items():
+              outcome = info.get("outcome")
+              if outcome:
+                  print(f"  {name}: {outcome}")
+          failed = [(name, info.get("outcome")) for name, info in outcomes.items()
+                    if info.get("outcome") not in (None, "success", "skipped")]
+          if failed:
+              print("")
+              print("以下断言未通过（其余步骤仍已执行，便于一次看全）：")
+              for name, outcome in failed:
+                  print(f"  - {name} ({outcome})")
+              sys.exit(1)
+          print("")
+          print("全部断言通过。")
           PY
 
       - name: 收集产物（供 artifact 上传）

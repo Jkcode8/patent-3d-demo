@@ -318,6 +318,8 @@ def measure_invariants(film: Path, ffmpeg: str, ffprobe: str, settings: dict,
 
 
 def main() -> int:
+    from config import enable_utf8_stdout
+    enable_utf8_stdout()
     parser = argparse.ArgumentParser(description="合成带配音+配乐+片头片尾的成片")
     parser.add_argument("project")
     parser.add_argument("--music", default=None)

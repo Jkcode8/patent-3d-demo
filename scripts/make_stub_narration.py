@@ -53,6 +53,8 @@ def tone_wav(path: Path, seconds: float, sr: int = 44100) -> None:
 
 
 def main() -> int:
+    from config import enable_utf8_stdout
+    enable_utf8_stdout()
     parser = argparse.ArgumentParser(description="生成离线占位旁白（CI 用）")
     parser.add_argument("project")
     parser.add_argument("--seconds-per-char", type=float, default=0.22)

@@ -96,12 +96,15 @@ def match(result: dict, expected: dict) -> tuple[bool, list[str]]:
 
 
 def main() -> int:
+    from config import enable_utf8_stdout
+    enable_utf8_stdout()
     parser = argparse.ArgumentParser(description="机构参数扫描与受力状态校验")
     parser.add_argument("params")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
-    params = json.loads(Path(args.params).read_text(encoding="utf-8"))
+    # utf-8-sig：用户用记事本/VS Code 存成带 BOM 的 JSON 也能读
+    params = json.loads(Path(args.params).read_text(encoding="utf-8-sig"))
     expected = params.get("expected", {})
     sweep = params.get("sweep", {"theta": [0], "pull": [0]})
     matches, rows = 0, []

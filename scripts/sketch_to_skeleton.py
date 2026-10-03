@@ -98,6 +98,8 @@ def build_skeleton(root: Path, extract: dict) -> dict:
 
 
 def main() -> int:
+    from config import enable_utf8_stdout
+    enable_utf8_stdout()
     parser = argparse.ArgumentParser(description="图纸标注 → 建模骨架 skeleton.json")
     parser.add_argument("project")
     parser.add_argument("--json", action="store_true")

@@ -33,6 +33,8 @@ def box_report(result: dict) -> dict:
 
 
 def main() -> int:
+    from config import enable_utf8_stdout
+    enable_utf8_stdout()
     parser = argparse.ArgumentParser(description="参数变更→尺寸/渲染验证")
     parser.add_argument("project")
     parser.add_argument("--param", action="append", default=[],

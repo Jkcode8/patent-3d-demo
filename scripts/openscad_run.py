@@ -51,6 +51,36 @@ ANGLES: dict[str, tuple[tuple[int, int, int], tuple[int, int, int]]] = {
 }
 VIEWPORT_RE = re.compile(r"^\s*\$vp[tdr]\s*=.*$", re.MULTILINE)
 DEFAULT_CALL_RE = re.compile(r"^\s*device\(\)\s*;\s*$", re.MULTILINE)
+GUARD_RE = r"^[ \t]*{key}[ \t]*=[ \t]*is_undef\(\s*{key}\s*\)[^;\n]*;[ \t]*(?://.*)?$"
+
+
+def param_preamble(defines: dict[str, str]) -> str:
+    """``K = V;`` lines to write *before* a model or template source.
+
+    The single supported way to feed parameters into OpenSCAD from this skill.
+    ``-D`` values are applied after a file's top-level assignments, so the usual
+    ``X = is_undef(SET_X) ? fallback : SET_X;`` idiom never sees them (verified on
+    OpenSCAD 2026.09) — written into the file instead, the guard and everything
+    derived from it pick the value up.
+
+    Every render path must build its preamble here; the repository test
+    ``test_only_one_place_builds_the_parameter_preamble`` pins that down.
+    """
+    return "\n".join(f"{key} = {value};" for key, value in sorted(defines.items()))
+
+
+def strip_param_guards(text: str, keys) -> str:
+    """Drop ``X = is_undef(X) ? default : X;`` guard lines for *keys*.
+
+    Needed when the caller supplies a value that the *template* also guards:
+    under repeated assignment OpenSCAD lets the last assignment win and its
+    ``is_undef()`` then returns true, so the guard line silently overwrites the
+    preamble value with the template default (verified on OpenSCAD 2026.09:
+    ``THETA=90; THETA = is_undef(THETA) ? -10 : THETA;`` evaluates to -10).
+    """
+    for key in keys:
+        text = re.sub(rf"(?m){GUARD_RE.format(key=re.escape(key))}", "", text)
+    return text
 
 
 def inline_model(model: Path) -> str:
@@ -85,8 +115,8 @@ def render_source(model: Path, defines: dict[str, str] | None = None,
         return model, None
     temp_dir = tempfile.TemporaryDirectory(prefix="p3d_render_")
     target = Path(temp_dir.name) / model.name
-    preamble = "\n".join(f"{key} = {value};" for key, value in sorted(defines.items()))
-    target.write_text(f"{preamble}\n{re.sub(r'\n{3,}', '\n\n', stripped)}", encoding="utf-8")
+    target.write_text(f"{param_preamble(defines)}\n{re.sub(r'\n{3,}', '\n\n', stripped)}",
+                      encoding="utf-8")
     for extra in model.parent.glob("*.scad"):      # keep sibling includes working
         if extra.name != model.name:
             shutil.copy2(extra, Path(temp_dir.name) / extra.name)
@@ -341,6 +371,8 @@ def run_via_mcp(root: Path, model: Path, out_dir: Path, angles: list[str],
 
 
 def main() -> int:
+    from config import enable_utf8_stdout
+    enable_utf8_stdout()
     parser = argparse.ArgumentParser(description="OpenSCAD 构建与渲染")
     parser.add_argument("--model", required=True, help=".scad 模型（可为相对项目路径）")
     parser.add_argument("--out-dir", required=True)

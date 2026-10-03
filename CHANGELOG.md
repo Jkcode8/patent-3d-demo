@@ -3,6 +3,56 @@
 本文件记录 `patent-3d-demo` 技能的对外可见变化。
 版本号同时出现在 `SKILL.md` 的 `metadata.version`，两者由单元测试强制一致。
 
+## [1.5.0] - 2026-10-04
+
+这一版是「消除同一条规则的第二份副本」的收口：v1.4.1 修的三处回归全部来自
+"规则被复制、副本漏改"，所以这版把规则收敛掉，再用测试把复制这件事本身挡住。
+
+### 新增 Added
+
+- **`dim_check.py` 图纸标注 ↔ 模型参数数值核对**：把图纸上的标注值逐个对到模型
+  参数上（单位归一到 mm，角度与 `4×φ20` 这类数量自动跳过），`--strict` 可在 CI
+  里当断言用。`verify_vs_drawing.py` 把两边都按包围盒归一化，**数字差十倍也照样
+  满分**——写错的尺寸只能靠这条兜。配套 `assets/example_dims/` 夹具（手写最小
+  DXF，两条 DXF 读取路径都能读）。
+- **`config.py --bump X.Y.Z --note …`**：一次同步四处版本号（`SKILL.md` /
+  `CHANGELOG.md` / `VERSION` / 示例 `project.json`）并插入 CHANGELOG 条目与
+  release 链接定义——这四处本来就由单元测试强制一致，手改容易漏。
+- **Windows 冒烟作业**（`windows-smoke`）：不设 `PYTHONUTF8` 跑单元测试 +
+  重定向输出编码回归 + `extract_dwg.ps1` 语法解析。此前 CI 全在 Linux，
+  Windows 专属路径（AutoCAD COM、SAPI、GBK 控制台）没有任何覆盖。
+
+### 修复 Fixed
+
+- **`extract_dxf._fmt()` 在 ezdxf 下全线失败**：`point[:3]` 对 ezdxf 的 `Vec3`
+  抛 `TypeError: slicing not supported`（它只实现整数索引），而异常被
+  `except` 吞成 `geo` 里的一行 `<error: …>`——结果是**装了 ezdxf 时
+  `cad_text.txt` 永远是空的**，TEXT/CIRCLE/ARC/INSERT 的坐标全部丢失。
+  改为按下标取值，两条读取路径都可复用。
+- **中文 Windows 下重定向输出会崩**：控制台/管道用 GBK，脚本一打印
+  ✓/≥/→ 就抛 `UnicodeEncodeError` 并中断报告（`check_kinematics.py` 实测）。
+  新增 `config.enable_utf8_stdout()`，25 个 CLI 入口全部先调它；CI 因为设了
+  `PYTHONUTF8=1` 一直看不见这个问题，所以另加了不设该变量的 Windows 作业。
+- **带 BOM 的 JSON 读不了**：`project.json` / `read_json` / `check_kinematics`
+  的参数文件 / `verify` 块原先都用严格 `utf-8`，用记事本或 VS Code 存成带 BOM
+  就报 `json.decoder.JSONDecodeError`。统一改 `utf-8-sig`。
+- **`SKILL.md` 引用不存在的 `voice_fit.py`**：实际没有这个脚本，换声线是重跑
+  `narration.py tts --voice …`。原先的"SKILL.md 提到的脚本必须存在"测试只查
+  `scripts/xxx.py` 前缀，裸文件名漏检，现补一条裸名检查。
+
+### 变更 Changed
+
+- **参数注入收敛为唯一入口**：`openscad_run.param_preamble()` 与
+  `strip_param_guards()` 现在是"前置赋值 + 剥离模板保护行"的唯一实现，
+  `storyboard` / `lineart` / `check_mechanism` / `check_templates` 全部复用。
+  新增不变量测试 `test_only_one_place_builds_the_parameter_preamble`
+  直接扫源码，任何第二份副本都会被拦下。
+- **CI 不再 fail-fast**：`example-regression` 的断言步骤加 `continue-on-error`
+  并以 `toJSON(steps)` 汇总收口。此前一条失败会掩盖后面四条，v1.4.1 排查时
+  线稿与叠合核对两条真问题就是这样被藏住的。
+- `SKILL.md` 的「可选增强」表删掉与六阶段流程重复的五行（快速预览 / 建模骨架 /
+  参数校验 / 干涉检查 / 机构断言），同一条信息只留一处。
+
 ## [1.4.1] - 2026-10-03
 
 ### 修复 Fixed
@@ -210,7 +260,8 @@
 - 中英双语 README、GitHub Actions（`regression` + `full-pipeline`）、
   真实案例 `cases/pier-anticollision/`。
 
-[1.4.1]: https://github.com/Jkcode8/patent-3d-demo/releases/tag/v1.4.1
+[1.5.0]: https://github.com/Jkcode8/patent-3d-demo/releases/tag/v1.5.0
+& https://github.com/Jkcode8/patent-3d-demo/releases/tag/v1.4.1
 [1.2.0]: https://github.com/Jkcode8/patent-3d-demo/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Jkcode8/patent-3d-demo/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Jkcode8/patent-3d-demo/releases/tag/v1.0.0

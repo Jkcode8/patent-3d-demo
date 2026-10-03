@@ -83,6 +83,8 @@ def _baseline_marker(proposal: dict) -> str:
 
 
 def main() -> int:
+    from config import enable_utf8_stdout
+    enable_utf8_stdout()
     parser = argparse.ArgumentParser(
         description="参数提案对比：多组参数 × 两状态并排渲染，供发明人一次对比")
     parser.add_argument("project", nargs="?", default=None, help="项目目录（默认当前目录）")

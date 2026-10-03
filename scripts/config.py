@@ -9,6 +9,7 @@ Usage:
     python config.py --check [--json]          # dependency report
     python config.py init-project <dir>        # create the project layout
     python config.py paths <dir>               # print the layout as JSON
+    python config.py --bump X.Y.Z --note "…"   # 同步四处版本号 + 插入 CHANGELOG 条目
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import glob
 import importlib.util
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -30,7 +32,7 @@ ASSETS = SKILL_ROOT / "assets"
 SEGMENTS = ASSETS / "segments"
 # 单一版本来源：SKILL.md 的 metadata.version、CHANGELOG.md 最新条目与本常量由
 # tests/test_units.py 强制一致，避免发版时漏改某一处。
-VERSION = "1.4.1"
+VERSION = "1.5.0"
 
 # ----------------------------------------------------------------- defaults
 DEFAULTS: dict = {
@@ -311,6 +313,25 @@ def describe(deps: dict) -> str:
 
 
 # ----------------------------------------------------------------- project
+def enable_utf8_stdout() -> None:
+    """Make stdout/stderr survive a non-UTF-8 console (Windows GBK 等).
+
+    On a Chinese Windows the console/locale encoding is GBK, so a *redirected*
+    stream (``python foo.py --json > report.json``, or any pipe) raises
+    ``UnicodeEncodeError`` the moment a script prints ``✓``/``≥``/``→`` — it
+    killed ``check_kinematics.py`` mid-report until this guard was added.
+    CI hides the problem because it sets ``PYTHONUTF8=1``; Windows users do not.
+
+    Every CLI entry point calls this first, and the repository test
+    ``test_every_cli_enables_utf8_stdout`` keeps new ones honest.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):   # 已重定向到非文本流
+            pass
+
+
 def project_paths(root: str | Path) -> dict[str, Path]:
     root = Path(root).expanduser().resolve()
     paths = {"root": root}
@@ -344,7 +365,8 @@ def load_settings(root: str | Path) -> dict:
     config_file = project_paths(root)["config"]
     if config_file.exists():
         try:
-            settings.update(json.loads(config_file.read_text(encoding="utf-8")))
+            # utf-8-sig：用户在记事本/VS Code 里存成带 BOM 的 JSON 也能读
+            settings.update(json.loads(config_file.read_text(encoding="utf-8-sig")))
         except json.JSONDecodeError:
             pass
     return settings
@@ -354,7 +376,7 @@ def read_json(path: str | Path, default=None):
     path = Path(path)
     if not path.exists():
         return default
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def write_json(path: str | Path, payload) -> None:
@@ -363,14 +385,102 @@ def write_json(path: str | Path, payload) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+RELEASE_URL_HINT = "/releases/tag/"
+
+
+def bump_version(new_version: str, *, root: str | Path | None = None,
+                 note: str = "") -> dict:
+    """Rewrite every place the repository pins the skill version.
+
+    Four files must agree (``SKILL.md`` frontmatter, ``CHANGELOG.md`` latest
+    heading, ``VERSION`` here and the example ``project.json``) and the unit
+    tests enforce that — editing them by hand is exactly the kind of
+    copy-the-rule-everywhere chore that produced the v1.4.0 regressions.  This
+    updates all four and inserts the CHANGELOG heading plus its link definition,
+    which the tests also expect.
+    """
+    if not SEMVER_RE.match(new_version or ""):
+        raise SystemExit(f"版本号需要 x.y.z 形式：{new_version!r}")
+    root = Path(root) if root else Path(__file__).resolve().parents[1]
+    skill_md = root / "SKILL.md"
+    changelog = root / "CHANGELOG.md"
+    example = root / "assets" / "example_simple" / "project.json"
+
+    log = changelog.read_text(encoding="utf-8")
+    if re.search(rf"(?m)^##\s*\[{re.escape(new_version)}\]", log):
+        raise SystemExit(f"CHANGELOG 里已经有 {new_version} 了")
+
+    changed: dict[str, str] = {}
+
+    # 一律以 LF 写回：Windows 上 write_text 会把 \n 变成 \r\n，与 .gitattributes
+    # 声明的 eol=lf 冲突，会让每次 bump 都刷出一堆行尾噪声
+    def _write(path: Path, text: str) -> None:
+        with path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+
+    text = skill_md.read_text(encoding="utf-8")
+    text, hits = re.subn(r'(?m)^(\s*version:\s*)"[^"]+"', rf'\1"{new_version}"', text, count=1)
+    if not hits:
+        raise SystemExit("SKILL.md frontmatter 里没找到 version:")
+    _write(skill_md, text)
+    changed["SKILL.md"] = new_version
+
+    here = Path(__file__).resolve()
+    source = here.read_text(encoding="utf-8")
+    source, hits = re.subn(r'(?m)^VERSION = "[^"]+"', f'VERSION = "{new_version}"',
+                           source, count=1)
+    if not hits:
+        raise SystemExit("config.py 里没找到 VERSION 常量")
+    _write(here, source)
+    changed["scripts/config.py"] = new_version
+
+    if example.exists():
+        payload = example.read_text(encoding="utf-8")
+        payload, hits = re.subn(r'("version"\s*:\s*)"[^"]+"', rf'\1"{new_version}"',
+                                payload, count=1)
+        if hits:
+            _write(example, payload)
+            changed["assets/example_simple/project.json"] = new_version
+
+    from datetime import date
+
+    body = note.strip() or "### 变更 Changed\n\n- （待补充）"
+    heading = f"## [{new_version}] - {date.today().isoformat()}\n\n{body}\n\n"
+    log, hits = re.subn(r"(?m)^##\s*\[", heading + "## [", log, count=1)
+    if not hits:
+        raise SystemExit("CHANGELOG.md 里没有 `## [版本]` 形式的条目")
+    match = re.search(rf"(?m)^\[\d+\.\d+\.\d+\]:\s*(\S*?){re.escape(RELEASE_URL_HINT)}",
+                      log)
+    if match:
+        link = f"[{new_version}]: {match.group(1)}{RELEASE_URL_HINT}v{new_version}"
+        log = re.sub(r"(?m)^\[\d+\.\d+\.\d+\]:", link + "\n&", log, count=1)
+    _write(changelog, log)
+    changed["CHANGELOG.md"] = new_version
+    return changed
+
+
 def main() -> int:
+    enable_utf8_stdout()
     parser = argparse.ArgumentParser(description="patent-3d-demo configuration")
     parser.add_argument("--check", action="store_true", help="dependency report (default)")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
+    parser.add_argument("--bump", metavar="X.Y.Z",
+                        help="同步四处版本号（SKILL.md / CHANGELOG.md / config.py / 示例 project.json）")
+    parser.add_argument("--note", default="", help="配合 --bump：写入 CHANGELOG 的正文")
     parser.add_argument("command", nargs="?",
                         help="check | init-project | paths（省略时等同 check）")
     parser.add_argument("project", nargs="?", help="项目目录")
     args = parser.parse_args()
+    if args.bump:
+        changed = bump_version(args.bump, note=args.note)
+        if args.json:
+            print(json.dumps(changed, ensure_ascii=False, indent=2))
+        else:
+            print(f"版本号已同步为 {args.bump}：")
+            for path, version in changed.items():
+                print(f"  {path} -> {version}")
+        return 0
     if args.check or args.command in (None, "check"):
         deps = detect_deps()
         if args.json:

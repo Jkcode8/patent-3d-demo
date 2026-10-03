@@ -60,6 +60,8 @@ def extract_images(path: Path, out_dir: Path) -> list[Path]:
 
 
 def main() -> int:
+    from config import enable_utf8_stdout
+    enable_utf8_stdout()
     parser = argparse.ArgumentParser(description="docx → 正文 + 插图")
     parser.add_argument("docx")
     parser.add_argument("out_dir")

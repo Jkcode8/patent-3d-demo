@@ -164,7 +164,7 @@ def project_verify_config(project: Path) -> dict:
     if not config_file.exists():
         return {}
     try:
-        data = json.loads(config_file.read_text(encoding="utf-8"))
+        data = json.loads(config_file.read_text(encoding="utf-8-sig"))
     except (json.JSONDecodeError, OSError):
         return {}
     block = data.get("verify") if isinstance(data, dict) else None
@@ -709,6 +709,8 @@ def drawing_side(path: Path, size: int, margin: int, trim: bool) -> tuple[dict, 
 
 
 def main() -> int:
+    from config import enable_utf8_stdout
+    enable_utf8_stdout()
     parser = argparse.ArgumentParser(
         description="模型正投影 ↔ 原图 叠合核对（比例与轮廓自检）")
     parser.add_argument("--project", default=None, help="项目目录（默认当前目录）")

@@ -74,16 +74,19 @@ def instantiate_source(template_name: str, model_name: str, model_source: str,
     is_undef(THETA) ? -10 : THETA;`` evaluates to -10).  For every parameter the
     caller provided, the matching guard line is therefore dropped so the
     preamble value reaches ``device()`` unchanged.
+
+    Both halves live in :mod:`openscad_run` (``param_preamble`` /
+    ``strip_param_guards``) so every render path — storyboard, lineart,
+    check_mechanism, check_templates — shares one implementation.  Keeping a
+    private copy of this rule is what produced the v1.4.0 blank-frame and
+    camera-default regressions, so the repository test
+    ``test_only_one_place_builds_the_parameter_preamble`` pins it down.
     """
-    text = template_text
-    for key in defines:
-        text = re.sub(
-            rf"(?m)^[ \t]*{re.escape(key)}[ \t]*=[ \t]*is_undef\(\s*"
-            rf"{re.escape(key)}\s*\)[^;\n]*;[ \t]*(?://.*)?$",
-            "", text)
-    preamble = "\n".join(f"{key} = {value};" for key, value in sorted(defines.items()))
+    from openscad_run import param_preamble, strip_param_guards
+
+    text = strip_param_guards(template_text, defines)
     return (f"// 由 {template_name} 实例化：模型 {model_name} 已内联\n"
-            f"{preamble}\n{model_source}\n/* ===== 段落驱动 ===== */\n{text}")
+            f"{param_preamble(defines)}\n{model_source}\n/* ===== 段落驱动 ===== */\n{text}")
 
 
 def frame_fingerprint(source: Path, defines: dict, settings: dict) -> str:
@@ -425,6 +428,8 @@ def cmd_render(args) -> int:
 
 
 def main() -> int:
+    from config import enable_utf8_stdout
+    enable_utf8_stdout()
     parser = argparse.ArgumentParser(description="分镜（storyboard）管理")
     sub = parser.add_subparsers(dest="command", required=True)
 

@@ -47,6 +47,8 @@ def frame_view() -> bool:
 
 
 def main() -> int:
+    from config import enable_utf8_stdout
+    enable_utf8_stdout()
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     check_only = "--check" in argv
     paths = [a for a in argv if not a.startswith("--")]

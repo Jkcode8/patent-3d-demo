@@ -28,6 +28,8 @@ def top_level_keys(frontmatter: str) -> set[str]:
 
 
 def main() -> int:
+    from config import enable_utf8_stdout
+    enable_utf8_stdout()
     root = (Path(sys.argv[1]).resolve() if len(sys.argv) > 1
             else Path(__file__).resolve().parent.parent)
     text = (root / "SKILL.md").read_text(encoding="utf-8")
