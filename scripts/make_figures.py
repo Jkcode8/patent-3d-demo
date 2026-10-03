@@ -15,7 +15,6 @@ import json
 import re
 from pathlib import Path
 
-import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from config import ASSETS, load_settings, project_paths, read_json
@@ -90,7 +89,8 @@ def main() -> int:
     color_views = figures.get("color_views", ["front-right-top-iso", "front", "top"])
     color_dir = paths["figures"] / "彩色附图"
     color_dir.mkdir(parents=True, exist_ok=True)
-    result = render_views(model, color_dir, color_views, {}, settings)
+    # inline_defines：把参数前置写入 wrapper，SET_* 才真正生效（-D 会被顶层赋值覆盖）
+    result = render_views(model, color_dir, color_views, {}, settings, inline_defines=True)
     if not result.get("ok"):
         raise SystemExit(f"彩色渲染失败：{result.get('error')} {result.get('details', '')[:400]}")
     contact_sheet(sorted(color_dir.glob("*__*.png")), color_dir / "附图_彩色.png",
@@ -99,7 +99,11 @@ def main() -> int:
     blackwhite = figures.get("blackwhite", {})
     mono_dir = paths["figures"] / "黑白附图"
     mono_views = blackwhite.get("mono_views", ["front-right-top-iso"])
-    render_views(model, mono_dir, mono_views, {"SET_MONO": "true"}, settings)
+    # SET_MONO 通过 wrapper 前置赋值传入，单色渲染（colorize=false）才真正生效
+    result = render_views(model, mono_dir, mono_views, {"SET_MONO": "true"}, settings,
+                          inline_defines=True)
+    if not result.get("ok"):
+        raise SystemExit(f"单色渲染失败：{result.get('error')} {result.get('details', '')[:400]}")
     contact_sheet(sorted(mono_dir.glob("*__*.png")), mono_dir / "附图_单色.png",
                   f"{storyboard.get('title', '')}　单色立体图")
 

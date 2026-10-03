@@ -1,0 +1,19 @@
+{
+  "_说明": "复制为 <项目>/mechanism.json 并按模型实际铰点函数修改。模型需导出函数：
+   pivot_*(theta) 返回 [Y, Z]（或 [X, Y, Z]），常量点也写成函数形式。
+   on_segment：断言 point 在 from→to 线段上（tol 为容差，单位同模型）；monotonic：
+   断言两铰点距离随 param 单调（increasing/decreasing/constant）；length_bounds：
+   断言距离在 [min, max] 内。defines 会前置写入 wrapper（可传 SET_THETA 等）。",
+  "param": {"name": "theta", "values": [0, 30, 45, 60, 90]},
+  "points": {"A": "pivot_A", "B": "pivot_B", "P": "pivot_P", "E": "arm_low"},
+  "on_segment": [
+    {"point": "B", "from": "P", "to": "E", "tol": 50}
+  ],
+  "monotonic": [
+    {"a": "A", "b": "B", "want": "increasing"}
+  ],
+  "length_bounds": [
+    {"a": "A", "b": "B", "min": 7000, "max": 22000}
+  ],
+  "defines": {}
+}

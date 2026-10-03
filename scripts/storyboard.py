@@ -65,10 +65,25 @@ def instantiate_source(template_name: str, model_name: str, model_source: str,
     ``BASE_L = is_undef(SET_BASE_L) ? 400 : SET_BASE_L;`` idiom — never sees it
     and silently keeps the fallback.  Written into the file, the fallback
     expression and everything derived from it pick the value up.
+
+    Templates guard their own defaults with the same idiom
+    (``THETA = is_undef(THETA) ? -10 : THETA;``).  Under repeated assignment
+    OpenSCAD lets the *last* assignment win and its ``is_undef()`` then returns
+    true, so that guard line silently overwrites the preamble value with the
+    template default (verified on OpenSCAD 2026.09: ``THETA=90; THETA =
+    is_undef(THETA) ? -10 : THETA;`` evaluates to -10).  For every parameter the
+    caller provided, the matching guard line is therefore dropped so the
+    preamble value reaches ``device()`` unchanged.
     """
+    text = template_text
+    for key in defines:
+        text = re.sub(
+            rf"(?m)^[ \t]*{re.escape(key)}[ \t]*=[ \t]*is_undef\(\s*"
+            rf"{re.escape(key)}\s*\)[^;\n]*;[ \t]*(?://.*)?$",
+            "", text)
     preamble = "\n".join(f"{key} = {value};" for key, value in sorted(defines.items()))
     return (f"// 由 {template_name} 实例化：模型 {model_name} 已内联\n"
-            f"{preamble}\n{model_source}\n/* ===== 段落驱动 ===== */\n{template_text}")
+            f"{preamble}\n{model_source}\n/* ===== 段落驱动 ===== */\n{text}")
 
 
 def frame_fingerprint(source: Path, defines: dict, settings: dict) -> str:
@@ -176,7 +191,7 @@ def cmd_draft(args) -> int:
         "intro": {"lines": [f"{title}，三维演示。"]},
         "outro": {"lines": [f"以上是{title}的三维演示，感谢观看。"]},
         "figures": {
-            "color_views": ["front-right-top-iso", "front", "top"],
+            "color_views": ["front-right-top-iso", "front-right-top-iso-close", "front", "top"],
             "blackwhite": {"mono_views": ["front-right-top-iso", "front"],
                            "lineart_views": ["front", "top", "side"]},
         },
@@ -277,10 +292,94 @@ def cmd_confirm(args) -> int:
         raise SystemExit("存在上述问题，未确认（可用 --force 强制确认）")
     storyboard["confirmed"] = True
     storyboard["confirmed_at"] = datetime.now().isoformat(timespec="seconds")
+    if args.auto:
+        storyboard["confirmed_by"] = "auto"
+        print(f"校验通过，已按规则自动确认分镜：{len(storyboard['segments'])} 段，可以进入渲染。")
+    else:
+        print(f"已确认分镜：{len(storyboard['segments'])} 段，可以进入渲染。")
     write_json(paths["storyboard"], storyboard)
     write_storyboard_md(paths["storyboard_md"], storyboard, paths["extract"])
-    print(f"已确认分镜：{len(storyboard['segments'])} 段，可以进入渲染。")
     return 0
+
+
+def _render_segment(seg: dict, paths: dict, settings: dict, timeline: dict,
+                    seg_dir: Path, force: bool) -> dict:
+    """Render one storyboard segment (the body of the old render loop).
+
+    Kept as a standalone function so ``--jobs`` can run independent segments in
+    parallel threads — each segment renders into its own frames directory via
+    its own OpenSCAD subprocess.
+    """
+    import openscad_run  # 延迟导入，避免无 OpenSCAD 时 check 也失败
+
+    seg_id = seg["id"]
+    frames_dir = paths["video"] / "frames" / seg_id
+    count = (seg.get("timeline") or timeline.get(seg_id) or {}).get("frames")
+    defines = {k: str(v) for k, v in (seg.get("defines") or {}).items()}
+    model = paths["model"] / Path(seg.get("model", "model/device.scad")).name
+    if not model.exists():
+        model = (paths["root"] / seg.get("model", "")).resolve()
+
+    # 实例化：把模型源码内联进来（不用 include —— OpenSCAD 打不开含非 ASCII 路径的 include，
+    # 但同一文件作为主文件却能正常解析；内联对任意路径都稳）。模型末尾的默认 device(); 去掉，
+    # 由段落模板决定姿态。
+    template = SEGMENTS / seg["template"]
+    generated = seg_dir / f"{seg_id}.scad"
+    if not template.exists():
+        return {"id": seg_id, "status": "failed", "error": f"模板缺失 {template.name}"}
+    model_source = openscad_run.inline_model(model)
+    template_text = template.read_text(encoding="utf-8")
+    template_text = re.sub(r"^\s*include\s*<@MODEL@>;\s*$", "", template_text,
+                           flags=re.MULTILINE)
+    if "@MODEL_B@" in template_text:
+        other = seg.get("model_b")
+        if not other:
+            return {"id": seg_id, "status": "failed",
+                    "error": "comparison 段需要在分镜里给出 model_b（对照模型路径）"}
+        template_text = template_text.replace(
+            "@MODEL_B@", (paths["root"] / other).resolve().as_posix())
+    generated.write_text(instantiate_source(template.name, model.name, model_source,
+                                            template_text, defines), encoding="utf-8")
+
+    # 机位随模型尺寸自适应：模板默认值是按大型构件给的，小模型会缩成一点
+    if "VPD" not in defines and model.exists():
+        cameras = {name: value
+                   for name, value in openscad_run.camera_defaults(generated, defines,
+                                                                   settings).items()
+                   if name not in defines}
+        if cameras:
+            defines.update(cameras)
+            # 相机默认值也是参数：重写一次，让它们走同一套"前置赋值"通道
+            generated.write_text(
+                instantiate_source(template.name, model.name, model_source,
+                                   template_text, defines), encoding="utf-8")
+
+    if count:
+        fingerprint = frame_fingerprint(generated, defines, settings)
+        manifest = read_json(frames_dir / CACHE_FILE, {}) or {}
+        cached = len(list(frames_dir.glob("*.png"))) if frames_dir.exists() else 0
+        if (manifest.get("fingerprint") == fingerprint
+                and manifest.get("frames") == count
+                and cached >= count and not force):
+            return {"id": seg_id, "frames": cached, "status": "cached"}
+        payload = openscad_run.render_views(generated, frames_dir, [], defines, settings,
+                                            animate=count)
+        if payload.get("ok"):
+            write_json(frames_dir / CACHE_FILE,
+                       {"fingerprint": fingerprint, "frames": count,
+                        "rendered_at": datetime.now().isoformat(timespec="seconds")})
+    else:
+        payload = {"ok": False, "error": "缺少时间轴（先运行 narration.py tts）"}
+    return {"id": seg_id, "status": "rendered" if payload.get("ok") else "failed",
+            "frames": payload.get("frames"), "error": payload.get("error")}
+
+
+def fast_settings(settings: dict) -> dict:
+    """Coarse-cut settings: lower resolution + lower tessellation, for a quick
+    preview pass before the expensive full render."""
+    return {**settings,
+            "render_size": settings.get("fast_render_size", "960,720"),
+            "scad_fn": settings.get("fast_scad_fn", settings["scad_fn"])}
 
 
 def cmd_render(args) -> int:
@@ -298,82 +397,23 @@ def cmd_render(args) -> int:
         raise SystemExit("分镜校验未通过")
 
     timeline = read_json(paths["root"] / "video" / "timeline.json", {}) or {}
-    import openscad_run  # 延迟导入，避免无 OpenSCAD 时 check 也失败
-
-    settings = load_settings(paths["root"])
+    settings = fast_settings(load_settings(paths["root"])) if args.fast else load_settings(paths["root"])
     seg_dir = paths["video"] / "segments"
     seg_dir.mkdir(parents=True, exist_ok=True)
-    results = []
-    for seg in storyboard["segments"]:
-        if not seg.get("enabled", True):
-            continue
-        if args.only and seg["id"] not in args.only.split(","):
-            continue
-        frames_dir = paths["video"] / "frames" / seg["id"]
-        count = (seg.get("timeline") or timeline.get(seg["id"]) or {}).get("frames")
-        defines = {k: str(v) for k, v in (seg.get("defines") or {}).items()}
-        model = paths["model"] / Path(seg.get("model", "model/device.scad")).name
-        if not model.exists():
-            model = (paths["root"] / seg.get("model", "")).resolve()
 
-        # 实例化：把模型源码内联进来（不用 include —— OpenSCAD 打不开含非 ASCII 路径的 include，
-        # 但同一文件作为主文件却能正常解析；内联对任意路径都稳）。模型末尾的默认 device(); 去掉，
-        # 由段落模板决定姿态。
-        template = SEGMENTS / seg["template"]
-        generated = seg_dir / f"{seg['id']}.scad"
-        if not template.exists():
-            results.append({"id": seg["id"], "status": "failed",
-                            "error": f"模板缺失 {template.name}"})
-            continue
-        model_source = openscad_run.inline_model(model)
-        template_text = template.read_text(encoding="utf-8")
-        template_text = re.sub(r"^\s*include\s*<@MODEL@>;\s*$", "", template_text,
-                               flags=re.MULTILINE)
-        if "@MODEL_B@" in template_text:
-            other = seg.get("model_b")
-            if not other:
-                results.append({"id": seg["id"], "status": "failed",
-                                "error": "comparison 段需要在分镜里给出 model_b（对照模型路径）"})
-                continue
-            template_text = template_text.replace(
-                "@MODEL_B@", (paths["root"] / other).resolve().as_posix())
-        generated.write_text(instantiate_source(template.name, model.name, model_source,
-                                                template_text, defines), encoding="utf-8")
+    enabled = [s for s in storyboard["segments"]
+               if s.get("enabled", True)
+               and (not args.only or s["id"] in args.only.split(","))]
+    work = lambda seg: _render_segment(seg, paths, settings, timeline, seg_dir, args.force)
+    if args.jobs > 1 and len(enabled) > 1:
+        from concurrent.futures import ThreadPoolExecutor
 
-        # 机位随模型尺寸自适应：模板默认值是按大型构件给的，小模型会缩成一点
-        if "VPD" not in defines and model.exists():
-            cameras = {name: value
-                       for name, value in openscad_run.camera_defaults(generated, defines,
-                                                                       settings).items()
-                       if name not in defines}
-            if cameras:
-                defines.update(cameras)
-                # 相机默认值也是参数：重写一次，让它们走同一套"前置赋值"通道
-                generated.write_text(
-                    instantiate_source(template.name, model.name, model_source,
-                                       template_text, defines), encoding="utf-8")
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            results = list(pool.map(work, enabled))
+    else:
+        results = [work(seg) for seg in enabled]
 
-        if count:
-            fingerprint = frame_fingerprint(generated, defines, settings)
-            manifest = read_json(frames_dir / CACHE_FILE, {}) or {}
-            cached = len(list(frames_dir.glob("*.png"))) if frames_dir.exists() else 0
-            if (manifest.get("fingerprint") == fingerprint
-                    and manifest.get("frames") == count
-                    and cached >= count and not args.force):
-                results.append({"id": seg["id"], "frames": cached, "status": "cached"})
-                continue
-            payload = openscad_run.render_views(generated, frames_dir, [], defines, settings,
-                                                animate=count)
-            if payload.get("ok"):
-                write_json(frames_dir / CACHE_FILE,
-                           {"fingerprint": fingerprint, "frames": count,
-                            "rendered_at": datetime.now().isoformat(timespec="seconds")})
-        else:
-            payload = {"ok": False, "error": "缺少时间轴（先运行 narration.py tts）"}
-        results.append({"id": seg["id"], "status": "rendered" if payload.get("ok") else "failed",
-                        "frames": payload.get("frames"), "error": payload.get("error")})
-
-    payload = {"segments": results,
+    payload = {"segments": results, "fast": bool(args.fast),
                "ok": all(r["status"] in ("rendered", "cached") for r in results)}
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -399,11 +439,17 @@ def main() -> int:
     confirm = sub.add_parser("confirm")
     confirm.add_argument("project")
     confirm.add_argument("--force", action="store_true")
+    confirm.add_argument("--auto", action="store_true",
+                        help="校验通过即自动确认（无人值守流程用，跳过人工复核）")
 
     render = sub.add_parser("render")
     render.add_argument("project")
     render.add_argument("--only", default=None, help="逗号分隔的段落 id")
     render.add_argument("--force", action="store_true")
+    render.add_argument("--fast", action="store_true",
+                        help="粗剪：低分辨率+低细分快速出预览，方向对了再全量渲染")
+    render.add_argument("--jobs", type=int, default=1,
+                        help="并行渲染段落数（每段一个 OpenSCAD 进程，多核提速，默认 1）")
     render.add_argument("--allow-unconfirmed", action="store_true")
     render.add_argument("--json", action="store_true")
 

@@ -24,10 +24,16 @@ import sys
 import wave
 from pathlib import Path
 
-import numpy as np
+try:
+    import numpy as np
+    HAVE_NUMPY = True
+except ImportError:  # 配乐合成与电平校验依赖 numpy；缺失时给出明确指引而非 traceback
+    HAVE_NUMPY = False
+
 from PIL import Image, ImageDraw, ImageFont
 
 from config import (
+    VERSION,
     find_ffmpeg,
     load_settings,
     project_paths,
@@ -56,6 +62,16 @@ def duration_of(ffprobe: str, path: Path) -> float:
     out = subprocess.run([ffprobe, "-v", "error", "-show_entries", "format=duration",
                           "-of", "csv=p=0", str(path)], capture_output=True, encoding="utf-8", errors="replace", check=True)
     return float(out.stdout.strip())
+
+
+def size_of(ffprobe: str, path: Path) -> tuple[int, int]:
+    """Video frame size of *path* (used to make concat inputs uniform)."""
+    out = subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0",
+                          "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0",
+                          str(path)], capture_output=True, encoding="utf-8",
+                         errors="replace", check=True)
+    width, height = out.stdout.strip().split("x")
+    return int(width), int(height)
 
 
 def read_wav(path: Path) -> tuple[int, np.ndarray]:
@@ -319,6 +335,9 @@ def main() -> int:
     ffmpeg, ffprobe = find_ffmpeg("ffmpeg"), find_ffmpeg("ffprobe")
     if not ffmpeg:
         raise SystemExit("未找到 ffmpeg：只能输出动画 GIF，无法合成配乐成片")
+    if not HAVE_NUMPY:
+        raise SystemExit("final_film.py 需要 numpy：请运行 pip install numpy"
+                         "（配乐合成与电平校验依赖它）")
 
     segments = [s for s in storyboard["segments"] if s.get("enabled", True) and s["id"] in timeline]
     # 片头/片尾时长按实际旁白长度排布，并留出纯配乐尾巴（供电平校验与收尾）
@@ -412,23 +431,62 @@ def main() -> int:
         report.append({"part": name, "seconds": round(duration_of(ffprobe, final), 2),
                        "file": final.name})
 
+    # 统一各段尺寸：片头/片尾卡片与内容段视频的高度可能不一致（如字幕栏），
+    # concat 要求编码参数完全一致，否则成片会出现高度跳变
+    target_w, target_h = (int(v) for v in settings["render_size"].split(","))
+    uniform: list[Path] = []
+    for index, part in enumerate(produced):
+        width, height = size_of(ffprobe, part)
+        if (width, height) == (target_w, target_h):
+            uniform.append(part)
+            continue
+        resized = work / f"uniform_{index:02d}_{part.name}"
+        scale = (f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+                 f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black")
+        run([ffmpeg, "-y", "-loglevel", "error", "-i", str(part), "-vf", scale,
+             "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
+             "-c:a", "copy", str(resized)])
+        uniform.append(resized)
+        report[index]["resized"] = f"{width}x{height} -> {target_w}x{target_h}"
+    produced = uniform
+
     listing = work / "concat.txt"
     listing.write_text("\n".join(f"file '{p.as_posix()}'" for p in produced), encoding="utf-8")
+    # —— 版本号命名 + 旧片自动备份 ——
+    # 正式产物始终固定为 完整版.mp4（下游/交付引用不变）；每次重跑前把上一版
+    # 自动备份为 完整版_<skill版本>_<yyyyMMdd_HHmmss>.mp4，避免手动区分版本。
     film = paths["video"] / "完整版.mp4"
+    if film.exists():
+        stamp = film.stat().st_mtime_ns
+        backup = paths["video"] / f"完整版_{VERSION}_{__import__('time').strftime('%Y%m%d_%H%M%S', __import__('time').localtime(stamp / 1e9))}.mp4"
+        if not backup.exists():
+            import shutil
+            shutil.copy2(film, backup)
+            report_backup = str(backup)
+        else:
+            report_backup = str(backup)
+    else:
+        report_backup = ""
+    t0 = __import__('time').time()
     run([ffmpeg, "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
          "-i", str(listing), "-c", "copy", str(film)])
+    film_seconds = round(__import__('time').time() - t0, 2)
 
     # 取样窗口：片头旁白（人声） vs 片尾最后的纯配乐尾巴
     speech_at = parts[0][1] + 1.2
     music_at = max(0.0, total - 1.5)
     checks = measure_invariants(film, ffmpeg, ffprobe, settings, speech_at, music_at, window=1.4)
     payload = {"film": str(film), "seconds": round(duration_of(ffprobe, film), 2),
-               "music": note, "parts": report, "checks": checks, "ok": bool(checks["voice_ok"])}
+               "music": note, "parts": report, "checks": checks, "ok": bool(checks["voice_ok"]),
+               "skill_version": VERSION, "assemble_seconds": film_seconds,
+               "backup_of_previous": report_backup}
     write_json(paths["video"] / "film_report.json", payload)
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print(f"成片：{film}  {payload['seconds']}s  配乐：{note}")
+        if report_backup:
+            print(f"旧版已备份：{report_backup}")
         print(f"人声 {checks['voice_db']} dB / 纯配乐 {checks['music_db']} dB "
               f"（差 {checks['voice_above_music_db']} dB，要求 ≥ "
               f"{settings['voice_above_music_db']}）")

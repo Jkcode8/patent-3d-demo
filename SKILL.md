@@ -4,7 +4,7 @@ description: "把专利交底书与 CAD 图纸做成参数化三维模型、彩�
 license: MIT
 allowed-tools: Read, Write, Edit, Grep, Glob, Bash
 metadata:
-  version: "1.1.0"
+  version: "1.4.0"
   short-description: "专利交底书/图纸 → 三维模型 + 附图 + 配音演示视频"
   argument-hint: "[项目目录，默认当前目录；或直接给交底书/图纸路径]"
   user-invocable: true
@@ -47,7 +47,9 @@ python <SKILL>/scripts/config.py --check --json # 机器可读
 ## 六阶段流程
 
 ```bash
-SKILL=~/.codex/skills/patent-3d-demo
+# SKILL=本技能所在目录（安装到哪个技能根就用哪个；示例统一写 <SKILL>，
+# 勿硬编码 ~/.codex/skills/… —— 那是源仓库路径，不是安装路径）
+SKILL=<SKILL>
 
 # ① 建项目骨架（原始资料/ _extract/ model/ figures/ video/ + storyboard.json）
 python $SKILL/scripts/config.py init-project <项目目录>
@@ -60,21 +62,37 @@ python $SKILL/scripts/extract_dxf.py <图.dxf> <项目>/_extract          # 无 
 python $SKILL/scripts/render_sketch.py <项目>/_extract                # 图元 → 视图 PNG
 
 # ③ 建模（复制骨架改写，见 references/stage2-model.md）
-#    产物：<项目>/model/device.scad（必须实现 device(theta,pull,water_z,step,explode,section)）
+#    产物：<项目>/model/device.scad（必须实现 device(theta,pull,water_z,step,explode,section,group_only)）
 python $SKILL/scripts/openscad_run.py --project <项目> --model model/device.scad \
        --out-dir figures --angles front,top,front-right-top-iso --build-stl --json
+#    图纸标注 → 建模骨架（部件清单/主视图/归一化位置，避免模块划分凭空想）
+python $SKILL/scripts/sketch_to_skeleton.py <项目>
+#    快速预览：低细分小图三视图，--watch 改模型即自动重渲（建模迭代闭环）
+python $SKILL/scripts/model_preview.py <项目>/model/device.scad --watch
+#    参数变更→尺寸验证：改参数前后对比 bbox/体积，死参数立刻现形
+python $SKILL/scripts/param_check.py <项目> --param SET_BASE_L=500
+#    装配干涉检查：按子模块导出 STL 两两比对包围盒，高置信干涉（需修）与贴靠连接分档
+python $SKILL/scripts/check_interference.py <项目> [--theta 90]
 #    建模自检：把模型正投影叠到原始图纸上核对比例/轮廓（强烈建议）
 python $SKILL/scripts/verify_vs_drawing.py --project <项目> --views front,top
 #    图纸在 原始资料/ 里会自动挑选；也可 --drawing 立面.dxf / --drawing-map front=…,top=…
+#    图纸显示的是非默认状态（如坝态立面）→ --view-defines 'front=SET_THETA=90'
+#    图纸带坐标标注/标题栏干扰 → --crop-map 'front=0.05,0.1,0.95,0.85'
+#    机构连接断言（可选但推荐）：B 恒在支臂上 / 杆长单调 / 长度范围
+python $SKILL/scripts/check_mechanism.py --project <项目> --model model/device.scad \
+       --config mechanism.json
 
-# ④ 分镜草案 → 用户确认（门禁，未确认不得渲染）
+# ④ 分镜草案 → 确认（门禁，未确认不得渲染）
 python $SKILL/scripts/storyboard.py draft   <项目>     # → storyboard.json + 分镜.md
 python $SKILL/scripts/storyboard.py check   <项目>     # 校验 + 列出将渲染的段落
 python $SKILL/scripts/storyboard.py confirm <项目>     # 确认后才放行
+python $SKILL/scripts/storyboard.py confirm <项目> --auto   # 无人值守：校验通过即确认
 
 # ⑤ 渲染与出图
 python $SKILL/scripts/narration.py tts   <项目> [--voice female|male]   # 时间轴
 python $SKILL/scripts/storyboard.py render <项目>                       # 逐段渲染帧
+python $SKILL/scripts/storyboard.py render <项目> --fast                # 粗剪（低分辨率）先看方向
+python $SKILL/scripts/storyboard.py render <项目> --jobs 4              # 多段并行渲染（多核提速）
 python $SKILL/scripts/lineart.py --model <项目>/model/device.scad \
        --out-dir <项目>/figures/黑白附图 --views front,top,side --formats svg,dxf,png
 python $SKILL/scripts/make_figures.py    <项目>                         # 彩色/黑白附图合成
@@ -92,13 +110,23 @@ python $SKILL/scripts/make_delivery.py <项目>              # 说明.md + 交�
 | 英文/多语种配音 | `narration.py tts <项目> --language en-US`（声线自动切 `en-US-*`；字幕仍用原文） |
 | 数字与单位读法规范化 | 默认开启：`φ1500`→"直径1500"、`1.5m`→"1.5米"、`16+16+17度`→"16度、16度、17度"、`−2.26m`→"负2.26米"（只改送去合成的文本，字幕不变） |
 | 剖切轮廓线稿 | `lineart.py … --sections 2`（按模型高度均分切割，含外轮廓 + 剖切轮廓） |
+| 俯视内部轮廓 | `lineart.py` 对 top/bottom 默认自动追加水平剖切（`--top-section 0` 关闭；俯视投影会被顶/底板盖成空框） |
+| 机构特写视角 | 视角名 `front-right-top-iso-close`（同机位 2× 放大，`draft` 默认已列入彩色附图） |
 | 爆炸状态线稿 | `lineart.py … --exploded <分离量>` |
 | 图题与尺寸线 | `lineart.py` 默认给 PNG 加图题与总宽/总高标注（单位与模型一致） |
+| 机构连接断言 | `check_mechanism.py --model model/device.scad --config mechanism.json`（模型导出铰点函数，断言点在支臂线段上/杆长单调/长度范围） |
 | 模板烟测 | `check_templates.py <项目> --frames 2 --render adjust`（8 类模板逐个实例化 + 语法/渲染） |
 | 离线成片（无 TTS 环境） | `make_stub_narration.py <项目>` 生成占位旁白，再走 compose/final_film |
 | 技能结构自检 | `check_skill_md.py .`（frontmatter 只允许 name/description/license/allowed-tools/metadata） |
-| **模型↔图纸核对** | `verify_vs_drawing.py --project <项目> [--drawing 图.dxf] [--views front,top]` → 三栏比对图（原图｜模型投影｜叠加）+ `核对报告.json`（长宽比偏差 / 覆盖率 / IoU） |
+| **模型↔图纸核对** | `verify_vs_drawing.py --project <项目> [--drawing 图.dxf] [--views front,top] [--view-defines 'front=SET_THETA=90'] [--crop-map 'front=0.05,0.1,0.95,0.85']` → 三栏比对图（原图｜模型投影｜叠加）+ `核对报告.json`（长宽比偏差 / 覆盖率 / IoU）。**v1.4 自动选图与定工况**：无 `--drawing-map` 时自动对多张候选图纸逐一核对取最优（干净视图优先）；可在 `<项目>/project.json` 写 `verify` 块固化每视图的 `drawing`/`defines`/`crop`，重跑无需再传参 |
+| **参数提案对比（发明人快迭代）** | `proposal_compare.py <项目> --inline '撑杆=SET_STRUT_L=11500;鱼腹=SET_CAMBER=6000'`（或写 `proposals.json`）→ 多组参数 × 桥/坝两状态并排渲染 `figures/提案对比/提案对比.png`，一次看多方案、减少来回反馈轮数 |
+| **DWG 无实例自动拉起** | `extract_dwg.ps1` 无运行 AutoCAD 时自动 `Start-Process acad.exe` 并等待 COM 注册（约 90s）；仍失败则明确提示改走 DXF/图片降级 |
+| **成片版本号 + 自动备份 + 耗时统计** | `final_film.py` 固定输出 `完整版.mp4`，重跑前把上一版自动备份为 `完整版_<skill版本>_<时间戳>.mp4`，`film_report.json` 记录 `skill_version`/`assemble_seconds`/`backup_of_previous`；`make_delivery.py` 把耗时写入 `说明.md` |
 | 参数扫描/剖切线稿 | `lineart.py … --define SET_XXX=值`（参数已能真正生效，见 references/troubleshooting.md） |
+| 建模快速预览 | `model_preview.py <模型> [--size 640,480] [--fn 12] [--watch]`（三视图秒出；--watch 改文件自动重渲） |
+| 图纸→建模骨架 | `sketch_to_skeleton.py <项目>` → `model/skeleton.json` + `.md`（部件/主视图/归一化位置/总体尺寸建议） |
+| 参数变更→尺寸验证 | `param_check.py <项目> --param SET_BASE_L=500` → 前后 bbox/体积对比 + 预览图；参数无效会告警 |
+| 装配干涉检查 | `check_interference.py <项目> [--theta 90] [--hit 0.35]`（按子模块 STL 包围盒两两比对，分高置信/贴靠两档；模型需实现 `group_only`） |
 | **纯函数单元测试** | `python -m unittest discover -s tests -t .`（秒级；不需要 OpenSCAD/ffmpeg） |
 
 **帧缓存**：`storyboard.py render` 把"实例化后的段落文件 + `-D` 参数 + 渲染设置"做哈希存入
@@ -152,6 +180,7 @@ python $SKILL/scripts/make_delivery.py <项目>              # 说明.md + 交�
 | `references/stage4-figures.md` | 视角与构图、彩色/黑白、线稿与 CAD 协作、参数表与图例 |
 | `references/stage5-video.md` | 时间轴对齐、字幕与片头尾、配乐与 ducking、编码与验收 |
 | `references/troubleshooting.md` | 已踩过的坑（必读，能省数小时） |
+| `assets/mechanism.example.json` | `check_mechanism.py` 配置模板（复制为 `<项目>/mechanism.json` 后改） |
 
 ## 示例
 

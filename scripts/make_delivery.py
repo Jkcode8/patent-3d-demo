@@ -61,6 +61,20 @@ def main() -> int:
                  f"- 人声 {checks.get('voice_db')} dB / 纯配乐 {checks.get('music_db')} dB"
                  f"（差 {checks.get('voice_above_music_db')} dB，要求 ≥ {settings['voice_above_music_db']}）",
                  f"- 整片响度 {checks.get('integrated_lufs')} LUFS（目标 {settings['loudnorm_i']}±1）"]
+        # —— 本次成片耗时与版本（final_film 写入） ——
+        if report.get("assemble_seconds") or report.get("skill_version"):
+            rows += ["", "## 本次成片耗时", "",
+                     f"- skill 版本：`{report.get('skill_version', '—')}`",
+                     f"- 成片拼接耗时：{report.get('assemble_seconds', '—')}s"
+                     + (f"；上一版已备份：`{report.get('backup_of_previous')}`"
+                        if report.get("backup_of_previous") else "")]
+        # 端到端流水线耗时估算：最早提取产物 → 最近成片
+        extract_mtimes = [p.stat().st_mtime for p in paths["extract"].rglob("*")
+                          if p.is_file() and p.stat().st_size > 0]
+        film_time = Path(report["film"]).stat().st_mtime if report.get("film") and Path(report["film"]).exists() else None
+        if extract_mtimes and film_time:
+            total_min = (film_time - min(extract_mtimes)) / 60.0
+            rows += [f"- 端到端耗时（最早提取 → 最近成片）：约 {total_min:.0f} 分钟"]
 
     rows += ["", "## 运行环境（本次）", "",
              f"- OpenSCAD：`{deps['openscad']}`",

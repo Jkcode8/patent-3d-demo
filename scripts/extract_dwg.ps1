@@ -1,4 +1,4 @@
-<#
+﻿<#
 Read-only extraction from an AutoCAD drawing via COM.
 
 Attaches to a running AutoCAD instance. Either uses the drawing that is already
@@ -22,17 +22,54 @@ param(
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
-function Get-Acad {
+function Find-AcadProgId {
     foreach ($id in @('AutoCAD.Application.24', 'AutoCAD.Application.23',
                       'AutoCAD.Application.22', 'AutoCAD.Application')) {
-        try { return [Runtime.InteropServices.Marshal]::GetActiveObject($id) } catch { }
+        if ([Runtime.InteropServices.Marshal]::GetActiveObject($id)) { return $id }
     }
-    throw 'No running AutoCAD instance found'
+    return $null
+}
+
+# 常见安装路径，用于无运行实例时自动拉起
+$AcadCandidates = @(
+    "C:\Program Files\Autodesk\AutoCAD 2026\acad.exe",
+    "C:\Program Files\Autodesk\AutoCAD 2025\acad.exe",
+    "C:\Program Files\Autodesk\AutoCAD 2024\acad.exe",
+    "C:\Program Files\Autodesk\AutoCAD 2023\acad.exe",
+    "C:\Program Files\Autodesk\AutoCAD 2022\acad.exe",
+    "C:\Program Files\Autodesk\AutoCAD 2018\acad.exe",
+    "C:\Program Files\Autodesk\AutoCAD 2014\acad.exe"
+)
+
+function Get-Acad {
+    # 1) 优先连接已运行实例
+    $running = Find-AcadProgId
+    if ($running) {
+        try { return [Runtime.InteropServices.Marshal]::GetActiveObject($running) } catch { }
+    }
+    # 2) 无运行实例 → 尝试自动拉起 acad.exe 并等待 COM 注册（最多约 90s）
+    $acadExe = $AcadCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if (-not $acadExe) {
+        try { $acadExe = (Get-Command acad.exe -ErrorAction SilentlyContinue).Source } catch { }
+    }
+    if ($acadExe) {
+        Write-Host "No running AutoCAD; launching '$acadExe' and waiting for COM registration..." -ForegroundColor Yellow
+        Start-Process $acadExe | Out-Null
+        for ($i = 0; $i -lt 30; $i++) {
+            $id = Find-AcadProgId
+            if ($id) {
+                try { return [Runtime.InteropServices.Marshal]::GetActiveObject($id) } catch { }
+            }
+            Start-Sleep -Seconds 3
+        }
+    }
+    throw 'No AutoCAD instance found (tried auto-launch). Please start AutoCAD manually and retry, or export the drawing to DXF and use extract_dxf.py.'
 }
 
 $acad = Get-Acad
 $opened = $false
 trap {
+    Write-Host "[extract_dwg] ERROR: $($_.Exception.Message)" -ForegroundColor Red
     # 出错时也要关掉本脚本打开的图纸，避免在用户 AutoCAD 里留下只读窗口
     if ($opened -and $doc) { try { $doc.Close($false) } catch { } }
     throw

@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
 import glob
 import importlib.util
 import json
@@ -29,7 +30,7 @@ ASSETS = SKILL_ROOT / "assets"
 SEGMENTS = ASSETS / "segments"
 # 单一版本来源：SKILL.md 的 metadata.version、CHANGELOG.md 最新条目与本常量由
 # tests/test_units.py 强制一致，避免发版时漏改某一处。
-VERSION = "1.1.0"
+VERSION = "1.4.0"
 
 # ----------------------------------------------------------------- defaults
 DEFAULTS: dict = {
@@ -43,6 +44,9 @@ DEFAULTS: dict = {
     "seg_seconds_max": 30,
     "intro_seconds": 6.0,
     "outro_seconds": 6.5,
+    # 粗剪预览（--fast）：低分辨率 + 低细分，先看方向再全量渲染
+    "fast_render_size": "960,720",
+    "fast_scad_fn": 24,
     # narration
     "voice": "female",                       # female | male
     "voice_rate": {"female": 12, "male": 15},  # percent
@@ -168,6 +172,40 @@ def module_available(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
 
 
+def scan_script_imports(scripts_dir: str | Path | None = None) -> dict[str, list[str]]:
+    """Top-level third-party imports used by every script, as ``module -> [script…]``.
+
+    The dependency report used to probe a hard-coded list, which missed modules
+    such as ``olefile`` (needed by ``extract_doc.py`` for legacy .doc files) until
+    the pipeline failed mid-way.  Scanning the actual ``import`` statements of the
+    shipped scripts makes the report complete: anything any script needs shows up
+    here, with the scripts that depend on it, before the user runs anything.
+    """
+    scripts_dir = Path(scripts_dir or SKILL_ROOT / "scripts")
+    deps: dict[str, list[str]] = {}
+    stdlib = set(getattr(sys, "stdlib_module_names", ()))
+    for path in sorted(scripts_dir.glob("*.py")):
+        if path.name == "__init__.py":
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except SyntaxError:
+            continue
+        names: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names.extend(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names.append(node.module.split(".")[0])
+        for name in dict.fromkeys(names):
+            if name == "__future__" or name in stdlib:
+                continue
+            deps.setdefault(name, [])
+            if path.name not in deps[name]:
+                deps[name].append(path.name)
+    return deps
+
+
 def network_ok(host: str = "speech.platform.bing.com", port: int = 443,
                timeout: float = 2.0) -> bool:
     try:
@@ -201,12 +239,18 @@ def detect_deps() -> dict:
     openscad = find_openscad()
     ffmpeg, ffprobe = find_ffmpeg("ffmpeg"), find_ffmpeg("ffprobe")
     mods = {name: module_available(name) for name in
-            ("numpy", "PIL", "ezdxf", "edge_tts", "docx", "pypdf", "fitz")}
+            ("numpy", "PIL", "ezdxf", "edge_tts", "docx", "pypdf", "fitz", "olefile")}
     autocad = has_autocad()
     sapi = list_sapi_voices() if os.name == "nt" else []
     online = network_ok() if mods["edge_tts"] else False
 
     voice_engine = "edge" if (mods["edge_tts"] and online) else ("sapi" if sapi else None)
+    # 全脚本 import 扫描：自检硬编码列表之外的依赖（如 olefile）也能被发现
+    script_imports = scan_script_imports()
+    missing_imports = {
+        name: scripts for name, scripts in sorted(script_imports.items())
+        if not module_available(name)
+    }
     return {
         "openscad": openscad,
         "ffmpeg": ffmpeg,
@@ -215,6 +259,8 @@ def detect_deps() -> dict:
         "sapi_voices": sapi,
         "network": online,
         "modules": mods,
+        "script_imports": script_imports,
+        "missing_imports": missing_imports,
         "engines": {
             "figure": "ffmpeg" if ffmpeg else None,
             "video": "ffmpeg" if ffmpeg else "none",          # no ffmpeg => GIF only
@@ -229,9 +275,12 @@ def detect_deps() -> dict:
                 None if ffmpeg else "未找到 ffmpeg：只能输出动画 GIF，无法合成 MP4/配乐",
                 None if voice_engine else "无可用语音引擎：edge-tts 不可用且未安装 SAPI 中文语音",
                 None if autocad else "无 AutoCAD COM：DWG 需先另存为 DXF 或提供 PDF/图片",
-                None if mods["numpy"] else "未安装 numpy：无法合成配乐与电平校验",
+                None if mods["numpy"] else "未安装 numpy：成片阶段（final_film.py）需要，无法合成配乐与电平校验",
                 None if mods["PIL"] else "未安装 Pillow：无法绘制字幕/片头片尾",
-                None if mods["ezdxf"] else "未安装 ezdxf：DXF 解析不可用",
+                None if mods["ezdxf"] else "未安装 ezdxf：DXF 解析不可用（verify_vs_drawing 有内置最小解析兜底）",
+                None if mods["olefile"] else "未安装 olefile：extract_doc.py 提取 .doc（OLE2）时不可用",
+                None if not missing_imports else "脚本依赖但未安装：" + "、".join(
+                    f"{name}（{', '.join(scripts)}）" for name, scripts in missing_imports.items()),
             ] if msg
         ],
     }

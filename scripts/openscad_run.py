@@ -45,6 +45,9 @@ ANGLES: dict[str, tuple[tuple[int, int, int], tuple[int, int, int]]] = {
     "bottom": ((0, 0, -100), (180, 0, 0)),
     "front-right-top-iso": ((80, -80, 80), (55, 0, 45)),
     "back-left-top-iso": ((-80, 80, 80), (55, 0, 225)),
+    # 特写：同一机位的 2× 放大（渲染时把相机距离减半），用于机构/铰点细节展示
+    "front-right-top-iso-close": ((80, -80, 80), (55, 0, 45)),
+    "front-left-top-iso-close": ((-80, 80, 80), (55, 0, 45)),
 }
 VIEWPORT_RE = re.compile(r"^\s*\$vp[tdr]\s*=.*$", re.MULTILINE)
 DEFAULT_CALL_RE = re.compile(r"^\s*device\(\)\s*;\s*$", re.MULTILINE)
@@ -61,28 +64,59 @@ def inline_model(model: Path) -> str:
     return DEFAULT_CALL_RE.sub("", model.read_text(encoding="utf-8"))
 
 
-def render_source(model: Path) -> tuple[Path, tempfile.TemporaryDirectory | None]:
-    """Return a model path safe to render (viewport presets removed)."""
+def render_source(model: Path, defines: dict[str, str] | None = None,
+                  *, strip_viewport: bool = True
+                  ) -> tuple[Path, tempfile.TemporaryDirectory | None]:
+    """Return a model path safe to render.
+
+    ``defines`` are written as assignments *before* the model source: OpenSCAD
+    applies ``-D`` values after a file's top-level assignments, so the usual
+    ``SET_X = is_undef(SET_X) ? fallback : SET_X;`` idiom never sees a ``-D``
+    value (verified on OpenSCAD 2026.09) — see lineart.wrapper_defines.  The
+    same preamble channel makes ``SET_MONO``, camera presets and state
+    parameters (``THETA``/``PULL``/...) work in every render path.
+
+    ``strip_viewport=False`` keeps ``$vpt/$vpr/$vpd`` presets (frame animation
+    relies on the fixed camera written into the source).
+    """
     text = model.read_text(encoding="utf-8")
-    stripped = VIEWPORT_RE.sub("", text)
-    if stripped == text:
+    stripped = VIEWPORT_RE.sub("", text) if strip_viewport else text
+    if not defines and stripped == text:
         return model, None
     temp_dir = tempfile.TemporaryDirectory(prefix="p3d_render_")
     target = Path(temp_dir.name) / model.name
-    target.write_text(re.sub(r"\n{3,}", "\n\n", stripped), encoding="utf-8")
+    preamble = "\n".join(f"{key} = {value};" for key, value in sorted(defines.items()))
+    target.write_text(f"{preamble}\n{re.sub(r'\n{3,}', '\n\n', stripped)}", encoding="utf-8")
     for extra in model.parent.glob("*.scad"):      # keep sibling includes working
         if extra.name != model.name:
             shutil.copy2(extra, Path(temp_dir.name) / extra.name)
     return target, temp_dir
 
 
-def camera_arg(label: str) -> str:
-    _translate, rotation = ANGLES[label]
-    return f"0,0,0,{rotation[0]},{rotation[1]},{rotation[2]},0"
+def inline_render_source(model: Path, defines: dict[str, str]) -> tuple[Path, tempfile.TemporaryDirectory | None]:
+    """Legacy alias: kept for callers that name it explicitly."""
+    return render_source(model, defines)
+
+
+def camera_arg(label: str, dist: int = 0) -> str:
+    translate, rotation = ANGLES[label]
+    if dist:                       # 特写等带距离的机位：用表中方向偏移
+        tx, ty, tz = translate
+    else:                          # dist=0 是 viewall 语义，translate 会被忽略，保持 0
+        tx = ty = tz = 0
+    return f"{tx},{ty},{tz},{rotation[0]},{rotation[1]},{rotation[2]},{dist}"
 
 
 def run_cli(openscad: str, argv: list[str], timeout: int) -> subprocess.CompletedProcess:
     return subprocess.run([openscad] + argv, capture_output=True, encoding="utf-8", errors="replace", timeout=timeout)
+
+
+def full_defines(defines: dict[str, str], settings: dict) -> dict[str, str]:
+    """Settings + user defines merged for the preamble assignment channel."""
+    merged = {"SET_FN": str(settings["scad_fn"]),
+              "SET_COIL_SEG": str(settings["scad_coil_seg"])}
+    merged.update(defines)
+    return merged
 
 
 def build_stl(model: Path, out_stl: Path, defines: dict[str, str],
@@ -91,10 +125,8 @@ def build_stl(model: Path, out_stl: Path, defines: dict[str, str],
     if not openscad:
         raise SystemExit("未找到 OpenSCAD，请设置 OPENSCAD_EXECUTABLE")
     out_stl.parent.mkdir(parents=True, exist_ok=True)
-    source, temp = render_source(model)
-    argv: list[str] = ["-o", str(out_stl), "-D", f"SET_FN={settings['scad_fn']}",
-                       "-D", f"SET_COIL_SEG={settings['scad_coil_seg']}"]
-    argv += [item for key, value in defines.items() for item in ("-D", f"{key}={value}")]
+    source, temp = render_source(model, full_defines(defines, settings))
+    argv: list[str] = ["-o", str(out_stl)]
     argv.append(str(source))
     try:
         result = run_cli(openscad, argv, timeout)
@@ -152,28 +184,40 @@ def camera_defaults(model: Path, defines: dict[str, str], settings: dict) -> dic
 
 
 def render_views(model: Path, out_dir: Path, angles: list[str], defines: dict[str, str],
-                 settings: dict, timeout: int = 900, animate: int | None = None) -> dict:
+                 settings: dict, timeout: int = 900, animate: int | None = None, *,
+                 size: str | None = None, inline_defines: bool = False) -> dict:
     openscad = find_openscad()
     if not openscad:
         raise SystemExit("未找到 OpenSCAD，请设置 OPENSCAD_EXECUTABLE")
     out_dir.mkdir(parents=True, exist_ok=True)
-    size = settings["render_size"]
+    render_size = size or settings["render_size"]
     written: list[str] = []
+    all_defines = full_defines(defines, settings)
+    # SET_MONO 渲染：模型自身的 color() 会被 colorize 关掉，此时 OpenSCAD 的
+    # --colorscheme 会接手给默认材质上色（Tomorrow 是彩色方案，Monotone 是黄棕
+    # 单色相）——所以统一先渲染再强制转灰度，保证交付的是黑白图
+    mono = str(defines.get("SET_MONO", "")).lower() in ("true", "1", "yes")
+    scheme = "Monotone" if mono else "Tomorrow"
     if animate:
-        # 逐帧动画使用模型里写好的 $vpt/$vpr/$vpd 固定机位，因此不做预设剥离，
+        # 逐帧动画使用模型里写好的 $vpt/$vpr/$vpd 固定机位，因此不剥离预设，
         # 也不传 --autocenter/--viewall（否则每帧取景会随模型变化抖动）。
+        source, temp = render_source(model, all_defines, strip_viewport=False)
         target = out_dir / f"{model.stem}.png"
-        argv = ["--animate", str(animate), "--imgsize", size, "--render",
-                "--projection=p", "--colorscheme", "Tomorrow",
-                "-D", f"SET_FN={settings['scad_fn']}",
-                "-D", f"SET_COIL_SEG={settings['scad_coil_seg']}"]
-        argv += [item for key, value in defines.items() for item in ("-D", f"{key}={value}")]
-        argv += ["-o", str(target), str(model)]
-        result = run_cli(openscad, argv, timeout)
+        argv = ["--animate", str(animate), "--imgsize", render_size, "--render",
+                "--projection=p", "--colorscheme", scheme,
+                "-o", str(target), str(source)]
+        try:
+            result = run_cli(openscad, argv, timeout)
+        finally:
+            if temp:
+                temp.cleanup()
         if result.returncode != 0:
             return {"ok": False, "error": "动画渲染失败",
                     "details": (result.stdout + result.stderr).strip()[-2000:]}
         rendered = sorted(out_dir.glob("*.png"))
+        if mono:
+            for frame in rendered:
+                to_grayscale(frame)
         blank = [p.name for p in rendered[:: max(1, len(rendered) // 6)] if is_blank(p)]
         if not rendered:
             return {"ok": False, "error": "动画没有产生任何帧",
@@ -183,17 +227,20 @@ def render_views(model: Path, out_dir: Path, angles: list[str], defines: dict[st
                     "details": (result.stdout + result.stderr).strip()[-1500:]}
         return {"ok": True, "frames": len(rendered), "dir": str(out_dir)}
 
-    source, temp = render_source(model)
+    source, temp = render_source(model, all_defines)
     try:
         for label in angles:
             if label not in ANGLES:
                 raise SystemExit(f"未知视角 {label!r}，可选：{', '.join(ANGLES)}")
             target = out_dir / f"{model.stem}__{label}.png"
-            argv = [f"--camera={camera_arg(label)}", "--imgsize", size, "--autocenter",
-                    "--viewall", "--render", "--projection=p", "--colorscheme", "Tomorrow",
-                    "-D", f"SET_FN={settings['scad_fn']}",
-                    "-D", f"SET_COIL_SEG={settings['scad_coil_seg']}"]
-            argv += [item for key, value in defines.items() for item in ("-D", f"{key}={value}")]
+            # 特写视角（*-close）：相机距离减半 = 2× 放大；默认机位仍用 viewall
+            dist = 0
+            if label.endswith("-close") and "VPD" not in defines:
+                defaults = camera_defaults(model, defines, settings)
+                dist = int(float(defaults.get("VPD", "0")) / 2)
+            argv = [f"--camera={camera_arg(label, dist)}", "--imgsize", render_size,
+                    "--autocenter", "--viewall", "--render", "--projection=p",
+                    "--colorscheme", scheme]
             argv += ["-o", str(target), str(source)]
             result = run_cli(openscad, argv, timeout)
             if result.returncode != 0 or not target.exists() or target.stat().st_size < 1000:
@@ -202,6 +249,8 @@ def render_views(model: Path, out_dir: Path, angles: list[str], defines: dict[st
             if is_blank(target):
                 return {"ok": False, "error": f"视角 {label} 渲染结果为空白（模型未加载？）",
                         "details": (result.stdout + result.stderr).strip()[-1500:]}
+            if mono:
+                to_grayscale(target)
             written.append(str(target))
     finally:
         if temp:
@@ -227,6 +276,17 @@ def is_blank(png: Path, threshold: float = 0.004) -> bool:
         return dark / total < threshold
     except Exception:
         return False
+
+
+def to_grayscale(png: Path) -> None:
+    """Rewrite a render as a true black-and-white image (SET_MONO output)."""
+    try:
+        from PIL import Image
+
+        with Image.open(png) as image:
+            image.convert("L").save(png)
+    except Exception:
+        pass
 
 
 def stl_metadata(path: Path) -> dict:

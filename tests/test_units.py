@@ -13,6 +13,7 @@ covered by .github/workflows/regression.yml instead.
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -29,10 +30,14 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import check_kinematics  # noqa: E402
+import check_interference  # noqa: E402
+import check_mechanism  # noqa: E402
 import config  # noqa: E402
 import lineart  # noqa: E402
 import narration  # noqa: E402
 import openscad_run  # noqa: E402
+import param_check  # noqa: E402
+import sketch_to_skeleton  # noqa: E402
 import storyboard  # noqa: E402
 import verify_vs_drawing as verify  # noqa: E402
 
@@ -322,6 +327,44 @@ class DrawingVerificationTests(unittest.TestCase):
         self.assertIsNotNone(prepared)
         self.assertGreater(verify.ink_pixels(prepared), 50)
 
+    def test_view_defines_parsing(self):
+        self.assertEqual(verify.parse_view_defines("front=SET_THETA=90; top=SET_THETA=0"),
+                         {"front": {"SET_THETA": "90"}, "top": {"SET_THETA": "0"}})
+        self.assertEqual(verify.parse_view_defines(None), {})
+        with self.assertRaises(ValueError):
+            verify.parse_view_defines("front=90")           # 缺 K=V 的第二段
+        with self.assertRaises(ValueError):
+            verify.parse_view_defines("front")              # 缺 view=K=V
+
+    def test_crop_parsing(self):
+        self.assertEqual(verify.parse_crop_map("front=0.05,0.1,0.95,0.85; top=0.1,0.1,0.9,0.9"),
+                         {"front": (0.05, 0.1, 0.95, 0.85),
+                          "top": (0.1, 0.1, 0.9, 0.9)})
+        self.assertEqual(verify.parse_crop_map(None), {})
+        self.assertEqual(verify.parse_crop_box("0.1,0.1,0.9,0.9"), (0.1, 0.1, 0.9, 0.9))
+        self.assertIsNone(verify.parse_crop_box(None))
+        with self.assertRaises(ValueError):
+            verify.parse_crop_box("0.1,0.1,0.9")            # 缺坐标
+        with self.assertRaises(ValueError):
+            verify.parse_crop_box("0.9,0.1,0.1,0.9")        # x0 >= x1
+
+    def test_crop_mask_keeps_the_subject_and_drops_the_label(self):
+        drawing = Image.new("L", (400, 400), 255)
+        draw = ImageDraw.Draw(drawing)
+        draw.rectangle([120, 120, 280, 280], outline=0, width=4)   # 主体
+        draw.point((20, 20), fill=0)                               # 标注（包围盒角落）
+        draw.point((30, 26), fill=0)
+        prepared = verify.prepare_ink(drawing, size=300, margin=20)
+        self.assertIsNotNone(prepared)
+        cropped = verify.crop_mask(prepared, (0.2, 0.2, 0.8, 0.8), size=300)
+        box = verify.ink_bbox(cropped)
+        self.assertIsNotNone(box)
+        # 裁剪后内容重铺居中：边缘留白而非贴着角落的标注
+        self.assertGreater(box[0], 5)
+        self.assertGreater(box[1], 5)
+        # 未裁剪时是原样返回
+        self.assertIs(verify.crop_mask(prepared, None, size=300), prepared)
+
     def test_span_and_aspect_helpers(self):
         rectangle = [[(0.0, 0.0), (200.0, 0.0), (200.0, 100.0), (0.0, 100.0)]]
         self.assertEqual(verify.span_of(rectangle), (200.0, 100.0))
@@ -355,6 +398,35 @@ class LineartTests(unittest.TestCase):
         for view in ("front", "back", "side", "top", "bottom"):
             self.assertIn(view, lineart.VIEW_ROTATIONS)
 
+    def test_top_view_gets_an_auto_section_cut(self):
+        jobs = lineart.build_jobs(["front", "top"], None, 0, 1,
+                                  lambda: (0.0, 100.0))
+        by_view = [(job["view"], job["cut"], job["cut_z"]) for job in jobs]
+        self.assertIn(("front", False, None), by_view)
+        # top 视图默认带一个水平剖切，剖切面在 Z≈60（0.4+0.4/2）
+        self.assertIn(("top", False, None), by_view)
+        cuts = [job for job in jobs if job["view"] == "top" and job["cut"]]
+        self.assertEqual(len(cuts), 1)
+        self.assertAlmostEqual(cuts[0]["cut_z"], 60.0)
+
+    def test_no_auto_section_when_extent_unavailable(self):
+        jobs = lineart.build_jobs(["top"], None, 0, 1, lambda: None)
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["suffix"], "")
+
+    def test_top_section_off_and_explicit_sections_keep_old_behaviour(self):
+        jobs = lineart.build_jobs(["front", "top"], None, 2, 0,
+                                  lambda: (0.0, 100.0))
+        cuts = [j for j in jobs if j["cut"]]
+        # 显式 --sections=2 对每个视图都加；--top-section=0 不加额外剖切
+        self.assertEqual(len(cuts), 2 * 2)
+        self.assertEqual(sorted(j["view"] for j in cuts), ["front", "front", "top", "top"])
+
+    def test_exploded_jobs_are_added_per_view(self):
+        jobs = lineart.build_jobs(["front", "top"], 300.0, 0, 0, lambda: None)
+        suffixes = [j["suffix"] for j in jobs]
+        self.assertEqual(suffixes.count("_exploded"), 2)
+
 
 class RenderGuardTests(unittest.TestCase):
     def test_is_blank_detects_empty_frames(self):
@@ -380,6 +452,220 @@ class RenderGuardTests(unittest.TestCase):
         self.assertEqual(openscad_run.camera_arg("front"), "0,0,0,90,0,0,0")
         with self.assertRaises(KeyError):
             openscad_run.camera_arg("no-such-angle")
+
+    def test_close_angle_exists_and_carries_a_camera_distance(self):
+        self.assertIn("front-right-top-iso-close", openscad_run.ANGLES)
+        self.assertTrue(openscad_run.camera_arg("front-right-top-iso-close", 2000)
+                        .endswith(",2000"))
+        # 未给 dist 时保持 viewall 语义（兼容旧调用）
+        self.assertTrue(openscad_run.camera_arg("front-right-top-iso-close").endswith(",0"))
+
+    def test_inline_defines_wrapper_puts_assignments_before_the_model(self):
+        from openscad_run import inline_render_source
+
+        with tempfile.TemporaryDirectory() as tmp:
+            model = write(Path(tmp) / "device.scad",
+                          "module device() { cube(1); }\ndevice();\n")
+            wrapper, handle = inline_render_source(model, {"SET_MONO": "true"})
+            try:
+                text = wrapper.read_text(encoding="utf-8")
+                self.assertLess(text.index("SET_MONO = true;"), text.index("module device"))
+            finally:
+                if handle:
+                    handle.cleanup()
+
+
+class MechanismCheckTests(unittest.TestCase):
+    def test_parse_vector_extracts_numbers(self):
+        self.assertEqual(check_mechanism.parse_vector("[1.0, 2.0]"), [1.0, 2.0])
+        self.assertEqual(check_mechanism.parse_vector("[14991.9, 14783.1]"),
+                         [14991.9, 14783.1])
+        self.assertEqual(check_mechanism.parse_vector("[-1.5e3, 2.25E2]"), [-1500.0, 225.0])
+        self.assertIsNone(check_mechanism.parse_vector("[undef, undef]"))
+
+    def test_dist_to_segment(self):
+        self.assertAlmostEqual(check_mechanism.dist_to_segment((5, 5), (0, 0), (10, 0)), 5.0)
+        self.assertAlmostEqual(check_mechanism.dist_to_segment((5, 0), (0, 0), (10, 0)), 0.0)
+        # 投影在端点外时取到端点的距离
+        self.assertAlmostEqual(check_mechanism.dist_to_segment((15, 0), (0, 0), (10, 0)), 5.0)
+        self.assertAlmostEqual(check_mechanism.dist_to_segment((1, 1, 1), (0, 0, 0), (0, 0, 0)),
+                               math.sqrt(3.0), places=6)
+
+    def test_on_segment_inside_and_outside(self):
+        samples = {
+            "B": [[5.0, 5.0], [6.0, 6.0]],
+            "P": [[0.0, 0.0], [0.0, 0.0]],
+            "E": [[10.0, 10.0], [10.0, 10.0]],
+        }
+        ok, details = check_mechanism.check_on_segment(
+            samples, {"point": "B", "from": "P", "to": "E", "tol": 1.0}, 1.0)
+        self.assertTrue(ok)
+        self.assertTrue(all(d["dist"] <= 1.0 for d in details))
+        # 第二个样本掉到线段外（到线距离 ~5.66）→ 断言失败
+        bad = dict(samples, B=[[5.0, 5.0], [6.0, 14.0]])
+        ok, details = check_mechanism.check_on_segment(
+            bad, {"point": "B", "from": "P", "to": "E", "tol": 1.0}, 1.0)
+        self.assertFalse(ok)
+
+    def test_monotonic(self):
+        self.assertTrue(check_mechanism.check_monotonic([1, 2, 3, 4], "increasing")[0])
+        self.assertFalse(check_mechanism.check_monotonic([4, 3, 2, 1], "increasing")[0])
+        self.assertTrue(check_mechanism.check_monotonic([4, 3, 2, 1], "decreasing")[0])
+        self.assertTrue(check_mechanism.check_monotonic([1, 1, 1], "constant")[0])
+        self.assertFalse(check_mechanism.check_monotonic([1, 1, 1], "increasing")[0])
+        # 数值噪声容忍：1e-6 以内的小回摆不算破坏单调
+        self.assertTrue(check_mechanism.check_monotonic([1, 2, 2.0000005, 3], "increasing")[0])
+        self.assertTrue(check_mechanism.check_monotonic([1], "constant")[0])
+
+    def test_length_bounds(self):
+        ok, details = check_mechanism.check_length_bounds([10, 15, 20], {"min": 5, "max": 25})
+        self.assertTrue(ok)
+        self.assertTrue(all(d["ok"] for d in details))
+        ok, _ = check_mechanism.check_length_bounds([10, 15, 30], {"min": 5, "max": 25})
+        self.assertFalse(ok)
+
+    def test_parse_config_validates_shape(self):
+        good = {"param": {"name": "theta", "values": [0, 90]}, "points": {"B": "pivot_B"}}
+        self.assertEqual(check_mechanism.parse_config(good), good)
+        with self.assertRaises(ValueError):
+            check_mechanism.parse_config({"points": {"B": "pivot_B"}})
+        with self.assertRaises(ValueError):
+            check_mechanism.parse_config({"param": {"name": "theta"}, "points": {}})
+
+
+class StoryboardFastSettingsTests(unittest.TestCase):
+    def test_fast_settings_lower_resolution_and_tessellation(self):
+        fast = storyboard.fast_settings(SETTINGS)
+        self.assertEqual(fast["render_size"], SETTINGS.get("fast_render_size", "960,720"))
+        self.assertEqual(fast["scad_fn"], SETTINGS.get("fast_scad_fn", SETTINGS["scad_fn"]))
+        self.assertNotEqual(fast["render_size"], SETTINGS["render_size"])
+        # 其余设置保持不变（fps 等）
+        self.assertEqual(fast["fps"], SETTINGS["fps"])
+
+    def test_fast_settings_accept_custom_defaults(self):
+        custom = dict(SETTINGS, fast_render_size="640,480", fast_scad_fn=12)
+        fast = storyboard.fast_settings(custom)
+        self.assertEqual(fast["render_size"], "640,480")
+        self.assertEqual(fast["scad_fn"], 12)
+
+
+class InstantiateGuardTests(unittest.TestCase):
+    """1.3.0：模板默认保护行不得覆盖前置参数（THETA=90 → -10 的根因回归）。"""
+
+    TEMPLATE = (
+        "SET_FN = is_undef(SET_FN) ? 48 : SET_FN;\n"
+        "THETA = is_undef(THETA) ? -10 : THETA;\n"
+        "VPD   = is_undef(VPD) ? 150000 : VPD;\n"
+        "device(theta = THETA * phase);\n"
+    )
+
+    def test_provided_param_guard_line_is_dropped(self):
+        out = storyboard.instantiate_source("t", "m.scad", "module device() {}\n",
+                                            self.TEMPLATE, {"THETA": "90"})
+        self.assertNotIn("is_undef(THETA)", out)
+        self.assertIn("THETA = 90;", out)
+
+    def test_missing_param_keeps_template_default(self):
+        out = storyboard.instantiate_source("t", "m.scad", "module device() {}\n",
+                                            self.TEMPLATE, {"THETA": "90"})
+        self.assertIn("is_undef(VPD)", out)          # 未提供 → 保留默认保护行
+
+    def test_guard_line_with_comment_is_also_dropped(self):
+        template = "THETA = is_undef(THETA) ? -10 : THETA;   // 默认微倾\n"
+        out = storyboard.instantiate_source("t", "m.scad", "module device() {}\n",
+                                            template, {"THETA": "90"})
+        self.assertNotIn("is_undef(THETA)", out)
+
+    def test_all_guards_dropped_when_all_params_provided(self):
+        defines = {"THETA": "90", "PULL": "900", "T_LOAD": "0.25"}
+        out = storyboard.instantiate_source("t", "m.scad", "module device() {}\n",
+                                            self.TEMPLATE + "PULL = is_undef(PULL) ? 800 : PULL;\n"
+                                            "T_LOAD = is_undef(T_LOAD) ? 0.20 : T_LOAD;\n",
+                                            defines)
+        for key in defines:
+            self.assertNotIn(f"is_undef({key})", out)
+
+
+class SkeletonTests(unittest.TestCase):
+    """1.3.0：sketch_to_skeleton 视图标注 → 骨架。"""
+
+    VIEWS = {
+        "平面": {"w": 1000, "h": 500, "n": 2,
+                 "bb": [0, 0, 1000, 500],
+                 "labels": [[200, 100, "面板"], [300, 400, "A-A（水坝状态）"]]},
+        "立面": {"w": 1000, "h": 800, "n": 1,
+                 "bb": [0, 0, 1000, 800],
+                 "labels": [[250, 300, "面板"]]},
+    }
+
+    def test_title_labels_are_filtered_out(self):
+        self.assertTrue(sketch_to_skeleton.is_title_label("A-A（水坝状态）"))
+        self.assertTrue(sketch_to_skeleton.is_title_label("B-B（桥梁状态）"))
+        self.assertFalse(sketch_to_skeleton.is_title_label("撑杆"))
+
+    def test_parts_are_clustered_across_views(self):
+        skeleton = sketch_to_skeleton.build_skeleton(Path("proj"), self.VIEWS)
+        names = [p["name"] for p in skeleton["parts"]]
+        self.assertIn("面板", names)
+        self.assertNotIn("A-A（水坝状态）", names)
+        panel = next(p for p in skeleton["parts"] if p["name"] == "面板")
+        self.assertEqual(sorted(panel["views"]), ["平面", "立面"])
+        self.assertIn(panel["main_view"], ["平面", "立面"])   # 同出现次数无主次
+        # 归一化位置为两视图均值
+        self.assertAlmostEqual(panel["x_norm"], (200 / 1000 + 250 / 1000) / 2, places=3)
+        self.assertEqual(skeleton["overall"]["x_span"], 1000)
+        self.assertEqual(skeleton["overall"]["z_height"], 800)
+
+
+class InterferenceTests(unittest.TestCase):
+    """1.3.0：check_interference 包围盒重叠与分档。"""
+
+    def test_box_overlap_zero_when_disjoint(self):
+        a = {"min": [0, 0, 0], "max": [10, 10, 10]}
+        b = {"min": [20, 0, 0], "max": [30, 10, 10]}
+        overlap, smaller = check_interference.box_overlap(a, b)
+        self.assertEqual(overlap, 0.0)
+        self.assertGreater(smaller, 0)
+
+    def test_box_overlap_full_nesting(self):
+        a = {"min": [0, 0, 0], "max": [100, 100, 100]}
+        b = {"min": [20, 20, 20], "max": [80, 80, 80]}
+        overlap, smaller = check_interference.box_overlap(a, b)
+        self.assertAlmostEqual(overlap, 60 ** 3)
+        self.assertAlmostEqual(smaller, 60 ** 3)
+
+    def test_group_names_cover_all_submodules(self):
+        self.assertEqual(len(check_interference.SUBMODULES), 12)
+        self.assertNotIn("river_bottom", check_interference.SUBMODULES)  # 底板排除
+
+
+class ParamCheckTests(unittest.TestCase):
+    """1.3.0：param_check 尺寸报告。"""
+
+    def test_box_report_derives_volume(self):
+        result = {"bounding_box": {"min": [0, 0, 0], "max": [10, 20, 30]},
+                  "dimensions": {"x": 10, "y": 20, "z": 30}, "facets": 42}
+        report = param_check.box_report(result)
+        self.assertEqual(report["volume_mm3"], 6000)
+        self.assertEqual(report["facets"], 42)
+
+
+class ConfigImportScanTests(unittest.TestCase):
+    def test_scan_script_imports_finds_third_party_dependencies(self):
+        deps = config.scan_script_imports(SCRIPTS)
+        self.assertIn("numpy", deps)
+        self.assertIn("final_film.py", deps["numpy"])
+        self.assertIn("PIL", deps)
+        self.assertNotIn("os", deps)            # 标准库不报告
+        self.assertNotIn("re", deps)
+
+    def test_detect_deps_reports_missing_imports_key(self):
+        report = config.detect_deps()
+        self.assertIsInstance(report["script_imports"], dict)
+        self.assertIsInstance(report["missing_imports"], dict)
+        # 本机常见的缺失项（olefile/ezdxf 等）会出现在警告里
+        joined = "\n".join(report["warnings"])
+        self.assertIn("脚本依赖但未安装", joined)
 
 
 class RepositoryInvariantTests(unittest.TestCase):

@@ -13,11 +13,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import subprocess
 import wave
+from array import array
 from pathlib import Path
-
-import numpy as np
 
 from config import find_ffmpeg, load_settings, project_paths, read_json, write_json
 
@@ -28,16 +28,28 @@ TONE_DBFS = -20.0
 
 
 def tone_wav(path: Path, seconds: float, sr: int = 44100) -> None:
+    """Tone burst, standard-library only (no numpy needed on the offline path)."""
     samples = int(max(0.3, seconds) * sr)
-    t = np.arange(samples) / sr
-    envelope = np.minimum(1.0, np.minimum(t / 0.05, (samples / sr - t) / 0.08))
-    signal = np.sin(2 * np.pi * TONE_HZ * t) * np.clip(envelope, 0, 1)
-    signal *= 10 ** (TONE_DBFS / 20.0) / max(1e-9, np.max(np.abs(signal)))
+    total = samples / sr
+    raw = array("h", [0]) * samples
+    peak = 0.0
+    for index in range(samples):
+        t = index / sr
+        envelope = min(1.0, min(t / 0.05, (total - t) / 0.08))
+        if envelope <= 0:
+            continue
+        value = math.sin(2 * math.pi * TONE_HZ * t) * envelope
+        raw[index] = int(value * 32767)
+        peak = max(peak, abs(value))
+    gain = (10 ** (TONE_DBFS / 20.0)) / max(1e-9, peak)
+    if gain != 1.0:
+        for index in range(samples):
+            raw[index] = int(raw[index] * gain)
     with wave.open(str(path), "wb") as handle:
         handle.setnchannels(1)
         handle.setsampwidth(2)
         handle.setframerate(sr)
-        handle.writeframes((signal * 32767).astype("<i2").tobytes())
+        handle.writeframes(raw.tobytes())
 
 
 def main() -> int:

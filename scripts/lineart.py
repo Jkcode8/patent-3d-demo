@@ -60,7 +60,7 @@ FONT_BOLD = [r"C:\Windows\Fonts\msyhbd.ttc", r"C:\Windows\Fonts\msyh.ttc",
 def wrap_model(model: Path, rotation: list[int], temp_dir: Path,
                defines: dict[str, str], *, cut: bool = False,
                cut_z: float | None = None, explode: float | None = None,
-               tag: str = "view") -> Path:
+               tag: str = "view", projection_mode: str = "both") -> Path:
     """Write a self-contained wrapper that projects *model* after *rotation*.
 
     The model source is inlined instead of included: OpenSCAD on this platform
@@ -69,6 +69,12 @@ def wrap_model(model: Path, rotation: list[int], temp_dir: Path,
 
     ``defines`` are written as assignments *before* the model source — see
     :func:`wrapper_defines` for why they must not go on the command line.
+
+    ``projection_mode``: ``"both"`` keeps the legacy single-wrapper behaviour
+    (two projections, ``cut=true`` + ``cut=false``); ``"cut"`` / ``"outline"``
+    emit exactly one projection.  The split matters: when a wrapper contains
+    both projections, OpenSCAD's SVG export keeps only the *last* one, so the
+    section cut silently disappears behind the outline.
     """
     from openscad_run import inline_model
 
@@ -78,11 +84,19 @@ def wrap_model(model: Path, rotation: list[int], temp_dir: Path,
     call = "device()"
     if explode is not None:
         call = f"device(explode = {explode})"
+    shift = f"translate([0, 0, {-float(cut_z or 0)}]) " if cut else ""
     if cut:
-        body = (f"projection(cut = true) rotate([{rotation[0]}, {rotation[1]}, {rotation[2]}]) "
-                f"translate([0, 0, {-float(cut_z or 0)}]) {call};\n"
-                f"projection(cut = false) rotate([{rotation[0]}, {rotation[1]}, {rotation[2]}]) "
-                f"translate([0, 0, {-float(cut_z or 0)}]) {call};\n")
+        if projection_mode == "cut":
+            body = (f"projection(cut = true) rotate([{rotation[0]}, {rotation[1]}, {rotation[2]}]) "
+                    f"{shift}{call};\n")
+        elif projection_mode == "outline":
+            body = (f"projection(cut = false) rotate([{rotation[0]}, {rotation[1]}, "
+                    f"{rotation[2]}]) {call};\n")
+        else:
+            body = (f"projection(cut = true) rotate([{rotation[0]}, {rotation[1]}, {rotation[2]}]) "
+                    f"{shift}{call};\n"
+                    f"projection(cut = false) rotate([{rotation[0]}, {rotation[1]}, "
+                    f"{rotation[2]}]) {call};\n")
     else:
         body = (f"projection(cut = false) rotate([{rotation[0]}, {rotation[1]}, "
                 f"{rotation[2]}]) {call};\n")
@@ -190,6 +204,66 @@ def polylines_to_png(polylines: list[list[tuple[float, float]]], target: Path,
     return True
 
 
+def build_jobs(views: list[str], exploded: float | None, sections: int,
+               top_section: int, extent_fn) -> list[dict]:
+    """Compose the projection jobs: regular views + explosion + section cuts.
+
+    ``extent_fn()`` returns the model's Z range ``(low, high)`` or ``None``
+    (used to place section cuts; called lazily, once for the top/bottom auto-cut
+    and again for the explicit ``--sections``).  Separated from ``main`` so the
+    view/task selection logic is unit-testable without OpenSCAD.
+    """
+    jobs: list[dict] = []
+    top_bbox: tuple[float, float] | None = None
+    for view in views:
+        jobs.append({"view": view, "cut": False, "cut_z": None, "explode": None, "suffix": ""})
+        if exploded:
+            jobs.append({"view": view, "cut": False, "cut_z": None,
+                         "explode": exploded, "suffix": "_exploded"})
+        # top/bottom 的俯视投影会被顶/底板盖成空框：默认补水平剖切看内部
+        if view in ("top", "bottom") and top_section:
+            if top_bbox is None:
+                top_bbox = extent_fn()
+            if top_bbox:
+                low, high = top_bbox
+                for index in range(1, top_section + 1):
+                    z = low + (high - low) * (0.4 + 0.4 * index / (top_section + 1))
+                    jobs.append({"view": view, "cut": True, "cut_z": z,
+                                 "explode": None, "suffix": f"_section{index}"})
+        if sections:
+            bbox = extent_fn()
+            if bbox:
+                low, high = bbox
+                for index in range(1, sections + 1):
+                    z = low + (high - low) * index / (sections + 1)
+                    jobs.append({"view": view, "cut": True, "cut_z": z,
+                                 "explode": None, "suffix": f"_section{index}"})
+    return jobs
+
+
+def merge_svg(target: Path, sources: list[Path]) -> None:
+    """Merge several same-viewBox SVG files (path elements only) into one file.
+
+    Section cuts are rendered as two wrappers (cut=true + cut=false) because
+    OpenSCAD's SVG export keeps only the *last* top-level projection; merging
+    here restores the single-file deliverable with both the section and the
+    outline.
+    """
+    header = '<svg xmlns="http://www.w3.org/2000/svg">'
+    body: list[str] = []
+    for index, source in enumerate(sources):
+        text = source.read_text(encoding="utf-8", errors="replace")
+        if index == 0:
+            match = re.search(r"<svg[^>]*>", text)
+            if match:
+                header = match.group(0)
+        body.extend(re.findall(r"<path\b[^>]*/>", text, re.DOTALL))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        '<?xml version="1.0" standalone="no"?>\n' + header + "\n"
+        + "\n".join(body) + "\n</svg>\n", encoding="utf-8")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="黑白线稿（正投影）导出")
     parser.add_argument("--model", required=True)
@@ -199,6 +273,9 @@ def main() -> int:
     parser.add_argument("--formats", default="svg,dxf,png")
     parser.add_argument("--sections", type=int, default=0,
                         help="额外输出 N 个水平剖切轮廓（投影 cut=true，含外轮廓）")
+    parser.add_argument("--top-section", type=int, default=1,
+                        help="top/bottom 视图自动追加 N 个水平剖切（默认 1；俯视投影时顶板/底板会盖住"
+                             "内部构件，只剩外框剪影，剖切才能看到内部轮廓）")
     parser.add_argument("--exploded", type=float, default=None,
                         help="额外输出爆炸状态线稿（值为分离量，单位同模型）")
     parser.add_argument("--title", default=None, help="图题（默认取 storyboard 标题）")
@@ -229,20 +306,9 @@ def main() -> int:
         storyboard = {}
 
     # 需要输出的"视图任务"：常规视图 +（可选）爆炸 +（可选）若干剖切
-    jobs: list[dict] = []
-    for view in [v.strip() for v in args.views.split(",") if v.strip()]:
-        jobs.append({"view": view, "cut": False, "cut_z": None, "explode": None, "suffix": ""})
-        if args.exploded:
-            jobs.append({"view": view, "cut": False, "cut_z": None,
-                         "explode": args.exploded, "suffix": "_exploded"})
-        if args.sections:
-            bbox = model_extent_for(model)
-            if bbox:
-                low, high = bbox
-                for index in range(1, args.sections + 1):
-                    z = low + (high - low) * index / (args.sections + 1)
-                    jobs.append({"view": view, "cut": True, "cut_z": z,
-                                 "explode": None, "suffix": f"_section{index}"})
+    jobs = build_jobs([v.strip() for v in args.views.split(",") if v.strip()],
+                      args.exploded, args.sections, args.top_section,
+                      lambda: model_extent_for(model))
 
     results = []
     with tempfile.TemporaryDirectory(prefix="p3d_lineart_") as tmp:
@@ -254,34 +320,58 @@ def main() -> int:
                 results.append({"view": view, "ok": False, "error": "未知视角"})
                 continue
             tag = f"{view}{job['suffix']}"
-            wrapper = wrap_model(model, rotation, temp_dir, wrapper_defines(settings, defines),
-                                 cut=job["cut"],
-                                 cut_z=job["cut_z"], explode=job["explode"], tag=tag)
-            entry = {"view": tag, "ok": False, "files": {}}
+            entry: dict = {"view": tag, "ok": False, "files": {}}
             # PNG 只能由 SVG 折线栅格化得到；把 png 交给 OpenSCAD 会导出一张彩色渲染图
             vector_formats = [f for f in formats if f != "png"]
             if "png" in formats and "svg" not in vector_formats:
                 vector_formats.append("svg")
-            for fmt in vector_formats:
-                target = out_dir / f"{model.stem}_{tag}.{fmt}"
-                argv = ["-o", str(target), str(wrapper)]
-                result = run_cli(openscad, argv, 600)
-                if result.returncode != 0 or not target.exists():
-                    entry.update(ok=False,
-                                 error=(result.stdout + result.stderr).strip()[-800:])
+            # 剖切任务拆成断面(cut) + 外轮廓(outline) 两个 wrapper：OpenSCAD 的 SVG
+            # 导出在同一文件里放两个 projection 时只保留最后一个，断面会被外框吞掉
+            subtasks = ([("_cut", {"cut": True, "cut_z": job["cut_z"]}),
+                         ("_out", {"cut": False, "cut_z": None})]
+                        if job["cut"] else
+                        [("", {"cut": False, "cut_z": None})])
+            svg_sources: list[Path] = []
+            error = None
+            for sub_suffix, params in subtasks:
+                wrapper = wrap_model(model, rotation, temp_dir,
+                                     wrapper_defines(settings, defines),
+                                     explode=job["explode"], tag=f"{tag}{sub_suffix}",
+                                     projection_mode="cut" if params["cut"] else "outline",
+                                     **params)
+                for fmt in vector_formats:
+                    target = out_dir / f"{model.stem}_{tag}{sub_suffix}.{fmt}"
+                    argv = ["-o", str(target), str(wrapper)]
+                    result = run_cli(openscad, argv, 600)
+                    if result.returncode != 0 or not target.exists():
+                        error = (result.stdout + result.stderr).strip()[-800:]
+                        break
+                    if fmt == "svg":
+                        svg_sources.append(target)
+                    else:
+                        entry["files"][f"{fmt}_{sub_suffix or 'view'}"] = str(target)
+                if error:
                     break
-                entry["files"][fmt] = str(target)
-            if entry.get("files", {}).get("svg") and "png" in formats:
-                png = Path(entry["files"]["svg"]).with_suffix(".png")
+            if error:
+                entry.update(ok=False, error=error)
+                results.append(entry)
+                continue
+            # 合并 SVG / PNG：断面 + 外轮廓合成一份交付
+            if svg_sources:
+                merged = out_dir / f"{model.stem}_{tag}.svg"
+                merge_svg(merged, svg_sources)
+                entry["files"]["svg"] = str(merged)
+            if svg_sources and "png" in formats:
+                png = out_dir / f"{model.stem}_{tag}.png"
                 label = f"{title} {view}图".strip()
                 if job["cut"]:
                     label += f"（剖切 z={job['cut_z']:.0f}）"
                 elif job["explode"]:
                     label += "（爆炸）"
-                if polylines_to_png(svg_polylines(Path(entry["files"]["svg"])), png,
-                                    title=label):
+                polylines = [line for src in svg_sources for line in svg_polylines(src)]
+                if polylines_to_png(polylines, png, title=label):
                     entry["files"]["png"] = str(png)
-            entry["ok"] = entry.get("ok") or bool(entry["files"])
+            entry["ok"] = bool(entry["files"])
             results.append(entry)
 
     payload = {"model": str(model), "out_dir": str(out_dir),

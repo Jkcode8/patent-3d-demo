@@ -78,6 +78,150 @@ def parse_drawing_map(spec: str | None) -> dict[str, str]:
     return mapping
 
 
+def parse_view_defines(spec: str | None) -> dict[str, dict[str, str]]:
+    """``"front=SET_THETA=90; top=SET_THETA=0"`` → per-view model defines.
+
+    Drawings often show the model in a *different state* than the default
+    ``device()`` call (a dam elevation is the dam state, while the model's
+    default is the bridge state), which made the first projection fail
+    every time.  ``;`` separates views, each ``view=K=V`` pairs one view with
+    one model parameter (``;`` cannot appear in a view or a key).
+    """
+    if not spec:
+        return {}
+    mapping: dict[str, dict[str, str]] = {}
+    for item in spec.split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise ValueError(f"--view-defines 需要 view=K=V 的形式，收到 {item!r}")
+        view, kv = item.split("=", 1)
+        view, kv = view.strip(), kv.strip()
+        if "=" not in kv:
+            raise ValueError(f"--view-defines 条目不完整（缺少 K=V）：{item!r}")
+        key, value = kv.split("=", 1)
+        if not view or not key:
+            raise ValueError(f"--view-defines 条目不完整：{item!r}")
+        mapping.setdefault(view, {})[key.strip()] = value.strip()
+    return mapping
+
+
+def parse_crop_map(spec: str | None) -> dict[str, tuple[float, float, float, float]]:
+    """``"front=0.05,0.1,0.95,0.85; top=0.1,0.1,0.9,0.9"`` → crop per view.
+
+    Sheet drawings carry coordinate labels/title blocks outside the ink that
+    still sit inside the bounding box and skew the normalisation.  Values are
+    fractions (0..1) of the drawing's ink bounding box: x0,y0,x1,y1.  ``;``
+    separates views because the box itself contains commas.
+    """
+    if not spec:
+        return {}
+    mapping: dict[str, tuple[float, float, float, float]] = {}
+    for item in spec.split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise ValueError(f"--crop-map 需要 view=x0,y0,x1,y1 的形式，收到 {item!r}")
+        view, box = item.split("=", 1)
+        parts = [float(p.strip()) for p in box.split(",")]
+        if len(parts) != 4 or not (0.0 <= parts[0] < parts[2] <= 1.0
+                                   and 0.0 <= parts[1] < parts[3] <= 1.0):
+            raise ValueError(f"--crop-map 的裁剪框必须是 0~1 的 x0,y0,x1,y1：{item!r}")
+        mapping[view.strip()] = tuple(parts)
+    return mapping
+
+
+def parse_crop_box(spec: str | None) -> tuple[float, float, float, float] | None:
+    if not spec:
+        return None
+    parts = [float(p.strip()) for p in spec.split(",")]
+    if len(parts) != 4 or not (0.0 <= parts[0] < parts[2] <= 1.0
+                               and 0.0 <= parts[1] < parts[3] <= 1.0):
+        raise ValueError(f"--crop 必须是 0~1 的 x0,y0,x1,y1：{spec!r}")
+    return tuple(parts)
+
+
+# ------------------------------------------------------------------ project.json 固化的核对配置
+def project_verify_config(project: Path) -> dict:
+    """Read <project>/project.json's ``verify`` block, if any.
+
+    Example:
+        {
+          "verify": {
+            "front": {"drawing": "_extract/pdf/v_elev.png",
+                      "defines": "SET_THETA=90", "crop": "0.05,0.1,0.95,0.85"},
+            "top":   {"drawing": "_extract/pdf/v_plan.png", "defines": "SET_THETA=0"}
+          }
+        }
+
+    Values are strings just like the CLI flags, so a project pins the exact
+    drawing + model state per view and re-running ``verify_vs_drawing.py`` on
+    later iterations needs no manual re-entry of flags.
+    """
+    config_file = project / "project.json"
+    if not config_file.exists():
+        return {}
+    try:
+        data = json.loads(config_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    block = data.get("verify") if isinstance(data, dict) else None
+    if not isinstance(block, dict):
+        return {}
+    out: dict[str, dict] = {}
+    for view, item in block.items():
+        if not isinstance(item, dict):
+            continue
+        entry: dict[str, str] = {}
+        if isinstance(item.get("drawing"), str):
+            entry["drawing"] = item["drawing"]
+        if isinstance(item.get("defines"), str):
+            entry["defines"] = item["defines"]
+        if isinstance(item.get("crop"), str):
+            entry["crop"] = item["crop"]
+        if entry:
+            out[view] = entry
+    return out
+
+
+def _score_entry(entry: dict) -> float:
+    """Lower is better.  Aspect error dominates; coverage breaks ties."""
+    if entry.get("error"):
+        return 1e9
+    ae = entry.get("aspect_error")
+    ae_s = ae if ae is not None else 1.0
+    return ae_s * 10.0 + (1.0 - entry.get("coverage_model", 0.0)) * 0.01
+
+
+def auto_drawing_candidates(root: Path) -> list[Path]:
+    """Order candidate drawings for *automatic* best-match pick.
+
+    Clean per-view exports (``_extract/pdf/v_*.png``, ``_extract/views*/``) rank
+    first because they carry little title-block clutter; anything whose name
+    hints at a projection (立面/elev/平面/plan/剖/section/坝/dam) beats generic
+    sheets.  The full ``find_drawings`` list is the tail so a drawing anywhere
+    under the project still gets a chance.
+    """
+    clean: list[Path] = []
+    named: list[Path] = []
+    rest: list[Path] = []
+    HINT = ("立面", "elev", "平面", "plan", "剖", "section", "坝", "dam",
+            "主视", "俯视", "侧视", "front", "top", "side")
+    for path in find_drawings(root):
+        name = path.name.lower()
+        rel = str(path.relative_to(root)).lower()
+        if ("_extract" in rel and "/pdf/" in rel and name.startswith("v_")) \
+                or "/views6/" in rel or "/views/" in rel:
+            clean.append(path)
+        elif any(h in name for h in HINT):
+            named.append(path)
+        else:
+            rest.append(path)
+    return clean + named + rest
+
+
 def find_drawings(root: Path) -> list[Path]:
     """Candidate drawings under 原始资料/ and _extract/, vector formats first."""
     found: list[Path] = []
@@ -395,6 +539,37 @@ def ink_bbox_span(mask: Image.Image) -> tuple[float, float] | None:
     return float(box[2] - box[0]), float(box[3] - box[1])
 
 
+def crop_mask(mask: Image.Image, crop: tuple[float, float, float, float] | None,
+              size: int = 1400) -> Image.Image:
+    """Keep only ``crop`` (0..1 of the ink bounding box) and re-fit the canvas.
+
+    Used to drop coordinate labels/title-block clutter that sits inside the ink
+    bounding box of a scanned sheet.  A no-op when ``crop`` is ``None``; the
+    cropped region is re-normalised so the later comparison stays shape-based.
+    """
+    if crop is None:
+        return mask
+    box = ink_bbox(mask)
+    if box is None:
+        return mask
+    width, height = box[2] - box[0], box[3] - box[1]
+    region = mask.crop((
+        int(box[0] + crop[0] * width), int(box[1] + crop[1] * height),
+        int(box[0] + crop[2] * width), int(box[1] + crop[3] * height),
+    ))
+    inner = ink_bbox(region)
+    if inner is None:
+        return Image.new("L", mask.size, 255)
+    region = region.crop(inner)
+    span = max(region.width, region.height, 1)
+    scale = (size - 2 * 30) / span
+    target = (max(1, int(region.width * scale)), max(1, int(region.height * scale)))
+    region = region.resize(target, Image.LANCZOS).point(lambda v: 0 if v < 150 else 255)
+    canvas = Image.new("L", (size, size), 255)
+    canvas.paste(region, ((size - target[0]) // 2, (size - target[1]) // 2))
+    return canvas
+
+
 def compare_masks(model_mask: Image.Image, drawing_mask: Image.Image,
                   tolerance: int = 4) -> dict:
     """Coverage/IoU of two ink masks, tolerant to a few pixels of line offset."""
@@ -522,6 +697,14 @@ def main() -> int:
                         help="图纸文件（DXF/SVG/PNG/JPG）；auto=自动在 原始资料/ 里找")
     parser.add_argument("--drawing-map", default=None,
                         help="按视角指定图纸，如 front=立面.png,top=平面.png")
+    parser.add_argument("--view-defines", default=None,
+                        help="按视角给模型状态参数，如 front=SET_THETA=90;top=SET_THETA=0 "
+                             "（分号分隔视角，每条 view=K=V）")
+    parser.add_argument("--crop-map", default=None,
+                        help="按视角裁剪图纸标注区，如 front=0.05,0.1,0.95,0.85;top=0.1,0.1,0.9,0.9 "
+                             "（0~1 的 x0,y0,x1,y1，相对墨迹包围盒；分号分隔视角）")
+    parser.add_argument("--crop", default=None,
+                        help="所有视角统一裁剪框，格式同 --crop-map 的 x0,y0,x1,y1")
     parser.add_argument("--out-dir", default=None, help="输出目录（默认 figures/核对）")
     parser.add_argument("--views", default="front", help="视角，逗号分隔（front/top/side/…）")
     parser.add_argument("--define", action="append", default=[], help="传给模型的 -D 参数 K=V")
@@ -556,10 +739,24 @@ def main() -> int:
 
     try:
         per_view = parse_drawing_map(args.drawing_map)
+        view_defines = parse_view_defines(args.view_defines)
+        crop_map = parse_crop_map(args.crop_map)
+        global_crop = parse_crop_box(args.crop)
     except ValueError as error:
         raise SystemExit(str(error))
 
+    # project.json 固化的核对配置（CLI 显式参数优先覆盖）。固化的 defines/crop
+    # 是无视角前缀的纯值（如 defines="SET_THETA=90"、crop="0.02,0.05,0.98,0.97"）。
+    pinned = project_verify_config(root)
+    def _kv_pairs(spec: str) -> dict[str, str]:
+        return dict(pair.strip().split("=", 1) for pair in spec.split(";") if "=" in pair)
+    pinned_defines = {view: _kv_pairs(item["defines"])
+                      for view, item in pinned.items() if "defines" in item}
+    pinned_crop = {view: tuple(float(x) for x in item["crop"].split(","))
+                   for view, item in pinned.items() if "crop" in item}
+
     candidates = find_drawings(root)
+    ordered_auto = auto_drawing_candidates(root)
     if args.drawing and args.drawing != "auto":
         fallback = Path(args.drawing)
         if not fallback.is_absolute():
@@ -581,72 +778,109 @@ def main() -> int:
     results: list[dict] = []
     with tempfile.TemporaryDirectory(prefix="p3d_verify_") as tmp:
         temp_dir = Path(tmp)
+
+        def _resolve_path(path_str: str | None, *, named: bool) -> Path | None:
+            """Resolve a user/pinned drawing reference to an existing path."""
+            if not path_str:
+                return None
+            p = Path(path_str)
+            if not p.is_absolute() and not p.exists():
+                cand = root / p
+                p = cand if cand.exists() else p
+            return p if Path(p).exists() else None
+
         for view in views:
-            entry: dict = {"view": view, "ok": False}
-            drawing = per_view.get(view)
-            drawing_path = Path(drawing) if drawing else fallback
-            if drawing and not drawing_path.is_absolute() and not drawing_path.exists():
-                drawing_path = root / drawing
-            if drawing_path is None or not Path(drawing_path).exists():
-                entry["error"] = f"视角 {view} 没有对应图纸"
-                results.append(entry)
-                continue
-            drawing_path = Path(drawing_path)
-            entry["drawing"] = str(drawing_path)
+            # —— 组装本视图的候选组合（图纸 × 工况）——
+            # 图纸来源优先级：CLI --drawing-map > project.json 固化 > 自动多候选
+            drawing_specs: list[str] = []
+            explicit_cli = per_view.get(view)
+            pinned_item = pinned.get(view, {})
+            if explicit_cli:
+                drawing_specs = [explicit_cli]
+            elif pinned_item.get("drawing"):
+                drawing_specs = [pinned_item["drawing"]]
+            else:
+                drawing_specs = [str(p) for p in ordered_auto[:6]]  # 自动最多试 6 张
 
-            polylines, error = project_view(model, view, defines, settings, openscad, temp_dir)
-            if polylines is None:
-                entry["error"] = f"模型投影失败：{error}"
-                results.append(entry)
-                continue
-            model_mask = rasterize(polylines, args.canvas, 90)
+            # 工况来源优先级：CLI --view-defines > project.json 固化 > 全局 --define
+            merged = {**defines, **view_defines.get(view, {}), **pinned_defines.get(view, {})}
 
-            side, error = drawing_side(drawing_path, args.canvas, 90, not args.no_trim)
-            if not side:
-                entry["error"] = f"图纸解析失败：{error}"
-                results.append(entry)
-                continue
-            entry["drawing_kind"] = side["kind"]
+            # 裁剪来源优先级：CLI --crop-map > project.json 固化 > 全局 --crop
+            crop = crop_map.get(view, global_crop)
+            if crop is None and view in pinned_crop:
+                crop = pinned_crop[view]
 
-            drawing_span = (span_of(side["polylines"]) if side["polylines"]
-                            else ink_bbox_span(side["mask"]))
-            model_span = span_of(polylines)
-            if not drawing_span or not model_span or min(model_span) <= 0 or min(drawing_span) <= 0:
-                entry["error"] = "无法取得有效轮廓范围（模型或图纸尺寸为零）"
-                results.append(entry)
-                continue
-            model_aspect = model_span[0] / model_span[1]
-            drawing_aspect = drawing_span[0] / drawing_span[1]
-            aspect_error = relative_error(model_aspect, drawing_aspect)
-            metrics = compare_masks(model_mask, side["mask"])
-            ok = (aspect_error is not None and aspect_error <= args.max_aspect_error
-                  and metrics["coverage_model"] >= args.min_coverage)
-            entry.update({
-                "model_aspect": round(model_aspect, 4),
-                "drawing_aspect": round(drawing_aspect, 4),
-                "aspect_error": round(aspect_error, 4) if aspect_error is not None else None,
-                **metrics,
-                "ok": bool(ok),
-                "caveat": CAVEAT,
-            })
-            lines = [
-                f"aspect {model_aspect:.3f} vs {drawing_aspect:.3f}"
-                f" (err {aspect_error * 100:.1f}%)",
-                f"coverage {metrics['coverage_model'] * 100:.1f}%",
-                f"IoU {metrics['iou'] * 100:.1f}%",
-                "PASS" if ok else "CHECK",
-            ]
-            sheet = comparison_sheet(side["mask"], model_mask, args.canvas,
-                                     f"{title} · {view} · {drawing_path.name}", lines, ok)
-            target = out_dir / f"核对_{view}.png"
-            sheet.save(target)
-            entry["image"] = str(target)
-            results.append(entry)
+            best: dict | None = None
+            for spec in drawing_specs:
+                drawing_path = _resolve_path(spec, named=bool(explicit_cli))
+                if drawing_path is None:
+                    continue
+                entry: dict = {"view": view, "ok": False, "drawing": str(drawing_path)}
+                polylines, error = project_view(model, view, merged, settings, openscad, temp_dir)
+                if polylines is None:
+                    entry["error"] = f"模型投影失败：{error}"
+                    break
+                model_mask = rasterize(polylines, args.canvas, 90)
+
+                side, error = drawing_side(drawing_path, args.canvas, 90, not args.no_trim)
+                if not side:
+                    entry["error"] = f"图纸解析失败：{error}"
+                    best = entry if best is None or _score_entry(entry) < _score_entry(best) else best
+                    continue
+                entry["drawing_kind"] = side["kind"]
+                drawing_mask = side["mask"]
+                if crop:
+                    drawing_mask = crop_mask(drawing_mask, crop, args.canvas)
+                    entry["crop"] = list(crop)
+
+                drawing_span = (span_of(side["polylines"]) if (side["polylines"] and not crop)
+                                else ink_bbox_span(drawing_mask))
+                model_span = span_of(polylines)
+                if not drawing_span or not model_span or min(model_span) <= 0 or min(drawing_span) <= 0:
+                    entry["error"] = "无法取得有效轮廓范围（模型或图纸尺寸为零）"
+                    best = entry if best is None or _score_entry(entry) < _score_entry(best) else best
+                    continue
+                model_aspect = model_span[0] / model_span[1]
+                drawing_aspect = drawing_span[0] / drawing_span[1]
+                aspect_error = relative_error(model_aspect, drawing_aspect)
+                metrics = compare_masks(model_mask, drawing_mask)
+                ok = (aspect_error is not None and aspect_error <= args.max_aspect_error
+                      and metrics["coverage_model"] >= args.min_coverage)
+                entry.update({
+                    "model_aspect": round(model_aspect, 4),
+                    "drawing_aspect": round(drawing_aspect, 4),
+                    "aspect_error": round(aspect_error, 4) if aspect_error is not None else None,
+                    "defines": merged,
+                    **metrics,
+                    "ok": bool(ok),
+                    "caveat": CAVEAT,
+                })
+                # 记录每张候选都核对过，便于人工复核选图
+                entry["drawing_candidates"] = [str(p) for p in drawing_specs]
+                lines = [
+                    f"aspect {model_aspect:.3f} vs {drawing_aspect:.3f}"
+                    f" (err {aspect_error * 100:.1f}%)",
+                    f"coverage {metrics['coverage_model'] * 100:.1f}%",
+                    f"IoU {metrics['iou'] * 100:.1f}%",
+                    "PASS" if ok else "CHECK",
+                ]
+                sheet = comparison_sheet(drawing_mask, model_mask, args.canvas,
+                                         f"{title} · {view} · {drawing_path.name}", lines, ok)
+                target = out_dir / f"核对_{view}.png"
+                sheet.save(target)
+                entry["image"] = str(target)
+                best = entry if best is None or _score_entry(entry) < _score_entry(best) else best
+
+            if best is None:
+                best = {"view": view, "ok": False,
+                        "error": f"视角 {view} 没有任何可用图纸（已尝试 {len(drawing_specs)} 张）"}
+            results.append(best)
 
     payload = {
         "model": str(model),
-        "drawings": {view: (per_view.get(view) or (str(fallback) if fallback else ""))
-                     for view in views},
+        "drawings": {r.get("view", view): r.get("drawing", "")
+                     for view, r in ((v, next((x for x in results if x.get("view") == v), {}))
+                                     for v in views)},
         "out_dir": str(out_dir),
         "thresholds": {"min_coverage": args.min_coverage,
                        "max_aspect_error": args.max_aspect_error},
