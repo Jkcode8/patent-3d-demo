@@ -30,7 +30,7 @@ ASSETS = SKILL_ROOT / "assets"
 SEGMENTS = ASSETS / "segments"
 # 单一版本来源：SKILL.md 的 metadata.version、CHANGELOG.md 最新条目与本常量由
 # tests/test_units.py 强制一致，避免发版时漏改某一处。
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 
 # ----------------------------------------------------------------- defaults
 DEFAULTS: dict = {

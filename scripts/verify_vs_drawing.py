@@ -238,6 +238,26 @@ def find_drawings(root: Path) -> list[Path]:
     return found
 
 
+def drawing_specs_for(view: str, *, explicit_cli: str | None, cli_drawing: Path | None,
+                      pinned_item: dict, ordered_auto: list[Path],
+                      limit: int = 6) -> list[str]:
+    """Drawings to try for one view, most explicit source first.
+
+    Priority: ``--drawing-map`` (per view) > ``--drawing`` (global CLI) >
+    project.json ``verify`` block > automatic candidates.  ``--drawing`` is a
+    deliberate user choice and must beat both the pinned config and the
+    automatic pick — dropping it (v1.4.0) made every explicit ``--drawing``
+    outside ``原始资料/``/``_extract/`` look like "no drawing at all".
+    """
+    if explicit_cli:
+        return [explicit_cli]
+    if cli_drawing is not None:
+        return [str(cli_drawing)]
+    if pinned_item.get("drawing"):
+        return [str(pinned_item["drawing"])]
+    return [str(path) for path in ordered_auto[:limit]]
+
+
 # ------------------------------------------------------------------ 几何工具
 def bounds(polylines: list[list[tuple[float, float]]]
            ) -> tuple[float, float, float, float] | None:
@@ -757,12 +777,15 @@ def main() -> int:
 
     candidates = find_drawings(root)
     ordered_auto = auto_drawing_candidates(root)
+    cli_drawing: Path | None = None
     if args.drawing and args.drawing != "auto":
-        fallback = Path(args.drawing)
-        if not fallback.is_absolute():
-            fallback = (root / fallback) if (root / fallback).exists() else Path(args.drawing)
-        if not fallback.exists():
-            raise SystemExit(f"图纸不存在：{fallback}")
+        cli_drawing = Path(args.drawing)
+        if not cli_drawing.is_absolute():
+            cli_drawing = ((root / cli_drawing) if (root / cli_drawing).exists()
+                           else Path(args.drawing))
+        if not cli_drawing.exists():
+            raise SystemExit(f"图纸不存在：{cli_drawing}")
+        fallback = cli_drawing
     elif args.drawing == "auto" or (not per_view and candidates):
         fallback = candidates[0] if candidates else None
     else:
@@ -795,12 +818,10 @@ def main() -> int:
             drawing_specs: list[str] = []
             explicit_cli = per_view.get(view)
             pinned_item = pinned.get(view, {})
-            if explicit_cli:
-                drawing_specs = [explicit_cli]
-            elif pinned_item.get("drawing"):
-                drawing_specs = [pinned_item["drawing"]]
-            else:
-                drawing_specs = [str(p) for p in ordered_auto[:6]]  # 自动最多试 6 张
+            drawing_specs = drawing_specs_for(view, explicit_cli=explicit_cli,
+                                              cli_drawing=cli_drawing,
+                                              pinned_item=pinned_item,
+                                              ordered_auto=ordered_auto)
 
             # 工况来源优先级：CLI --view-defines > project.json 固化 > 全局 --define
             merged = {**defines, **view_defines.get(view, {}), **pinned_defines.get(view, {})}

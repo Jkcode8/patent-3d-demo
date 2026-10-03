@@ -3,6 +3,43 @@
 本文件记录 `patent-3d-demo` 技能的对外可见变化。
 版本号同时出现在 `SKILL.md` 的 `metadata.version`，两者由单元测试强制一致。
 
+## [1.4.1] - 2026-10-03
+
+### 修复 Fixed
+
+- **模板烟测的相机默认值被模板自身默认值顶掉**：`check_templates.py` 自己复制了一份
+  "把模型内联进模板"的逻辑，漏掉了 `storyboard.instantiate_source()` 的两步处理——
+  ① 剥离调用方已提供参数对应的模板保护行，② 带着相机默认值重新实例化。于是
+  `seg_adjust` 里的 `VPD = is_undef(VPD) ? 165000 : VPD;` 始终生效，按模型尺寸算出的
+  自适应机位进不去，1 m 量级的示例模型被框成一个点、渲染成空白帧，CI 的
+  「8 类段落模板烟测（语法 + 真渲染 2 帧）」因此失败（v1.4.0 引入）。现在
+  `check_templates.py` 直接复用 `storyboard.instantiate_source()`，烟测校验的就是
+  渲染器真正产出的那个文件，规则不再有第二份副本。
+- **剖切线稿的 DXF 没有合并件**：v1.2.1 把剖切任务拆成 `_cut` / `_out` 两个 wrapper
+  （为绕过 OpenSCAD SVG 导出只保留最后一个 projection 的问题）后，只把 SVG 合并回
+  `*_section1.svg`，DXF 仍是一对 `*_section1_cut.dxf` + `*_section1_out.dxf`，
+  与 CHANGELOG 写明的"合并回单个 SVG/DXF"以及 v1.1.0 的交付契约（CI 一直断言
+  `device_front_section1.dxf` 存在）都不符。新增 `lineart.merge_dxf()`：两个文件同源
+  同表头，拼接 ENTITIES 段即得到单个可直接进 AutoCAD 的 DXF；`entry["files"]["dxf"]`
+  现在始终指向单文件交付件。
+- **`--drawing` 被自动选图重构架空**：v1.4.0 的"多候选图纸自动选优"把每视图的候选
+  组装改成 `--drawing-map` → `project.json` 固化 → 自动候选三条来源，却漏掉了
+  `--drawing <文件>` 这条路径——解析它的 `fallback` 变量此后无人读取（v1.1.0 里
+  是 `drawing_path = Path(drawing) if drawing else fallback`）。于是显式传的图纸只要
+  不在 `原始资料/`、`_extract/` 下，就会被当成"没有任何可用图纸（已尝试 0 张）"，
+  CI 的「模型与图纸叠合核对」与「负向对照」两步因此失败。新增
+  `drawing_specs_for()`（可单测的纯函数）明确优先级：
+  `--drawing-map` > `--drawing` > `project.json` > 自动候选。
+
+### 新增 Added
+
+- **回归测试** `CheckTemplatesInstantiationTests`：断言烟测实例化与 storyboard 同规则
+  ——相机值真的写进生成文件、模板的大构件默认值被剥离、`include <@MODEL@>;` 已换成内联模型。
+- **回归测试** `LineartTests` 新增 DXF 合并用例：合并件只保留一个 `ENTITIES` 段与一个
+  `EOF`、断面和外轮廓都在，且无 ENTITIES 段的文件能安全降级。
+- **回归测试** `DrawingVerificationTests` 新增选图优先级用例：`--drawing` 必须压过
+  `project.json` 固化与自动候选，未提供时依次回落到固化图纸、自动候选（最多 6 张）。
+
 ## [1.4.0] - 2026-10-03
 
 ### 新增 Added（减人工介入 / 提速）
@@ -173,6 +210,7 @@
 - 中英双语 README、GitHub Actions（`regression` + `full-pipeline`）、
   真实案例 `cases/pier-anticollision/`。
 
+[1.4.1]: https://github.com/Jkcode8/patent-3d-demo/releases/tag/v1.4.1
 [1.2.0]: https://github.com/Jkcode8/patent-3d-demo/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Jkcode8/patent-3d-demo/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Jkcode8/patent-3d-demo/releases/tag/v1.0.0

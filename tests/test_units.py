@@ -32,6 +32,7 @@ if str(SCRIPTS) not in sys.path:
 import check_kinematics  # noqa: E402
 import check_interference  # noqa: E402
 import check_mechanism  # noqa: E402
+import check_templates  # noqa: E402
 import config  # noqa: E402
 import lineart  # noqa: E402
 import narration  # noqa: E402
@@ -373,6 +374,35 @@ class DrawingVerificationTests(unittest.TestCase):
         self.assertEqual(verify.relative_error(1.0, 2.0), 0.5)
         self.assertIsNone(verify.relative_error(None, 2.0))
 
+    def test_explicit_drawing_beats_pinned_and_auto_candidates(self):
+        """1.4.1：--drawing 显式指定的图纸必须真的被用来核对。"""
+        auto = [Path("原始资料/视图.png"), Path("_extract/v_front.png")]
+        self.assertEqual(
+            verify.drawing_specs_for("front", explicit_cli="map.dxf",
+                                     cli_drawing=Path("外部/立面.dxf"),
+                                     pinned_item={"drawing": "pinned.png"},
+                                     ordered_auto=auto),
+            ["map.dxf"])
+        # --drawing 的文件不在 原始资料/_extract 里时，同样要用它
+        self.assertEqual(
+            verify.drawing_specs_for("front", explicit_cli=None,
+                                     cli_drawing=Path("figures/黑白附图/device_front.dxf"),
+                                     pinned_item={"drawing": "pinned.png"},
+                                     ordered_auto=auto),
+            [str(Path("figures/黑白附图/device_front.dxf"))])
+
+    def test_pinned_drawing_and_auto_candidates_are_last_resorts(self):
+        auto = [Path(f"view{i}.png") for i in range(8)]
+        self.assertEqual(
+            verify.drawing_specs_for("front", explicit_cli=None, cli_drawing=None,
+                                     pinned_item={"drawing": "pinned.png"},
+                                     ordered_auto=auto),
+            ["pinned.png"])
+        self.assertEqual(
+            verify.drawing_specs_for("front", explicit_cli=None, cli_drawing=None,
+                                     pinned_item={}, ordered_auto=auto),
+            [str(path) for path in auto[:6]])
+
 
 class LineartTests(unittest.TestCase):
     def test_wrapper_defines_merge_settings_and_overrides(self):
@@ -426,6 +456,36 @@ class LineartTests(unittest.TestCase):
         jobs = lineart.build_jobs(["front", "top"], 300.0, 0, 0, lambda: None)
         suffixes = [j["suffix"] for j in jobs]
         self.assertEqual(suffixes.count("_exploded"), 2)
+
+    # 最小 OpenSCAD 风格 ASCII DXF：只有 HEADER + ENTITIES 两段
+    DXF = ("999\nDXF from OpenSCAD\n  0\nSECTION\n  2\nHEADER\n  0\nENDSEC\n"
+           "  0\nSECTION\n  2\nENTITIES\n{body}  0\nENDSEC\n  0\nEOF\n")
+
+    def test_dxf_sections_are_merged_into_one_deliverable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            temp = Path(tmp)
+            cut = write(temp / "device_front_section1_cut.dxf",
+                        self.DXF.format(body="  0\nLWPOLYLINE\n  8\nCUT\n"))
+            out = write(temp / "device_front_section1_out.dxf",
+                        self.DXF.format(body="  0\nLWPOLYLINE\n  8\nOUT\n"))
+            target = temp / "device_front_section1.dxf"
+            lineart.merge_dxf(target, [cut, out])
+            text = target.read_text(encoding="ascii")
+            self.assertIn("CUT", text)
+            self.assertIn("OUT", text)
+            self.assertEqual(text.count("EOF"), 1)          # 只保留一个文件尾
+            self.assertEqual(text.count("ENTITIES"), 1)     # 只有一个 ENTITIES 段
+            head, body, tail = lineart.split_dxf(text)
+            self.assertIn("SECTION", "\n".join(head))
+            self.assertIn("CUT", "\n".join(body))
+            self.assertIn("OUT", "\n".join(body))
+            self.assertEqual(tail[-1].strip(), "EOF")
+
+    def test_split_dxf_without_entities_degrades_gracefully(self):
+        head, body, tail = lineart.split_dxf("999\nnothing here\n")
+        self.assertEqual(head, ["999", "nothing here"])
+        self.assertEqual(body, [])
+        self.assertEqual(tail, [])
 
 
 class RenderGuardTests(unittest.TestCase):
@@ -584,6 +644,46 @@ class InstantiateGuardTests(unittest.TestCase):
                                             defines)
         for key in defines:
             self.assertNotIn(f"is_undef({key})", out)
+
+
+class CheckTemplatesInstantiationTests(unittest.TestCase):
+    """1.4.1：烟测必须复用 storyboard 的实例化规则（否则相机默认值失效）。"""
+
+    TEMPLATE = (
+        "include <@MODEL@>;\n"
+        "VPT_Z = is_undef(VPT_Z) ? 0 : VPT_Z;\n"
+        "VPD   = is_undef(VPD) ? 165000 : VPD;\n"
+        "$vpd = VPD;\n"
+        "device();\n"
+    )
+    MODEL = "MARK_DIM = 400;\nmodule device() { cube(MARK_DIM); }\ndevice();\n"
+
+    def _instantiate(self, defines):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        template = write(root / "seg_adjust.scad", self.TEMPLATE)
+        model = write(root / "device.scad", self.MODEL)
+        target = root / "out.scad"
+        return check_templates.instantiate(template, model, target, defines), target
+
+    def test_camera_defines_reach_the_generated_file(self):
+        text, target = self._instantiate({"VPD": "2800", "VPT_Z": "150"})
+        self.assertEqual(target.read_text(encoding="utf-8"), text)
+        self.assertIn("VPD = 2800;", text)
+        self.assertIn("VPT_Z = 150;", text)
+        self.assertNotIn("165000", text)             # 模板大构件默认值已剥离
+        self.assertNotIn("is_undef(VPD)", text)
+        self.assertLess(text.index("VPD = 2800;"), text.index("module device()"))
+
+    def test_template_defaults_survive_without_camera_defines(self):
+        text, _ = self._instantiate({})
+        self.assertIn("is_undef(VPD)", text)
+
+    def test_include_line_is_replaced_by_the_inlined_model(self):
+        text, _ = self._instantiate({})
+        self.assertNotIn("@MODEL@", text)
+        self.assertIn("module device()", text)
 
 
 class SkeletonTests(unittest.TestCase):

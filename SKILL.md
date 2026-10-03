@@ -4,7 +4,7 @@ description: "把专利交底书与 CAD 图纸做成参数化三维模型、彩�
 license: MIT
 allowed-tools: Read, Write, Edit, Grep, Glob, Bash
 metadata:
-  version: "1.4.0"
+  version: "1.4.1"
   short-description: "专利交底书/图纸 → 三维模型 + 附图 + 配音演示视频"
   argument-hint: "[项目目录，默认当前目录；或直接给交底书/图纸路径]"
   user-invocable: true

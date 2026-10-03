@@ -264,6 +264,42 @@ def merge_svg(target: Path, sources: list[Path]) -> None:
         + "\n".join(body) + "\n</svg>\n", encoding="utf-8")
 
 
+def split_dxf(text: str) -> tuple[list[str], list[str], list[str]]:
+    """Split an OpenSCAD ASCII DXF into (head, ENTITIES records, tail).
+
+    OpenSCAD writes HEADER/TABLES/BLOCKS/ENTITIES sections; the split wrappers
+    of one section job differ only inside ENTITIES, so head + both record
+    blocks + tail is a valid single DXF.
+    """
+    lines = text.splitlines()
+    for index in range(len(lines) - 3):
+        if (lines[index].strip() == "0" and lines[index + 1].strip() == "SECTION"
+                and lines[index + 3].strip() == "ENTITIES"):
+            body = index + 4
+            for end in range(body, len(lines) - 1):
+                if lines[end].strip() == "0" and lines[end + 1].strip() == "ENDSEC":
+                    return lines[:body], lines[body:end], lines[end:]
+            return lines[:body], lines[body:], []
+    return lines, [], []
+
+
+def merge_dxf(target: Path, sources: list[Path]) -> None:
+    """Merge same-model DXF exports (section cut + outline) into one file.
+
+    ``--formats dxf`` promises one DXF per view, but a section job is exported
+    as two wrappers (see ``merge_svg``) and would otherwise ship as a
+    ``*_cut.dxf`` + ``*_out.dxf`` pair.  The two files come from the same model
+    and header, so splicing their ENTITIES records restores the single-file
+    deliverable that goes straight into AutoCAD.
+    """
+    head, body, tail = split_dxf(sources[0].read_text(encoding="ascii", errors="replace"))
+    for source in sources[1:]:
+        body.extend(split_dxf(source.read_text(encoding="ascii", errors="replace"))[1])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="ascii", errors="replace", newline="\n") as handle:
+        handle.write("\n".join(head + body + tail) + "\n")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="黑白线稿（正投影）导出")
     parser.add_argument("--model", required=True)
@@ -332,6 +368,7 @@ def main() -> int:
                         if job["cut"] else
                         [("", {"cut": False, "cut_z": None})])
             svg_sources: list[Path] = []
+            dxf_sources: list[Path] = []
             error = None
             for sub_suffix, params in subtasks:
                 wrapper = wrap_model(model, rotation, temp_dir,
@@ -348,6 +385,9 @@ def main() -> int:
                         break
                     if fmt == "svg":
                         svg_sources.append(target)
+                    elif fmt == "dxf":
+                        dxf_sources.append(target)
+                        entry["files"][f"{fmt}_{sub_suffix or 'view'}"] = str(target)
                     else:
                         entry["files"][f"{fmt}_{sub_suffix or 'view'}"] = str(target)
                 if error:
@@ -361,6 +401,14 @@ def main() -> int:
                 merged = out_dir / f"{model.stem}_{tag}.svg"
                 merge_svg(merged, svg_sources)
                 entry["files"]["svg"] = str(merged)
+            # DXF 同样只交付一份：单 wrapper 时就是它本身，剖切时把两个 wrapper
+            # 的 ENTITIES 段拼起来（否则交付目录里只剩 *_cut.dxf + *_out.dxf）
+            if len(dxf_sources) == 1:
+                entry["files"]["dxf"] = str(dxf_sources[0])
+            elif len(dxf_sources) > 1:
+                merged_dxf = out_dir / f"{model.stem}_{tag}.dxf"
+                merge_dxf(merged_dxf, dxf_sources)
+                entry["files"]["dxf"] = str(merged_dxf)
             if svg_sources and "png" in formats:
                 png = out_dir / f"{model.stem}_{tag}.png"
                 label = f"{title} {view}图".strip()

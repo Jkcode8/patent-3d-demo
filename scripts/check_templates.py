@@ -16,15 +16,23 @@ from pathlib import Path
 
 from config import SEGMENTS, load_settings, project_paths
 from openscad_run import camera_defaults, find_openscad, inline_model, render_views, run_cli
+from storyboard import instantiate_source
 
 
 def instantiate(template: Path, model: Path, target: Path, defines: dict) -> str:
-    """Inline the model into a throwaway segment file (same rule as storyboard)."""
-    model_source = inline_model(model)
+    """Inline the model into a throwaway segment file (same rule as storyboard).
+
+    Delegates to ``storyboard.instantiate_source`` rather than re-implementing
+    the inlining: that function also drops the template's own
+    ``X = is_undef(X) ? default : X;`` guard lines for the parameters the caller
+    supplies, which is what lets the computed camera defaults reach ``device()``.
+    Spelling the rule out a second time here (the v1.4.0 behaviour) lost the
+    stripping, so ``seg_adjust`` kept its large-structure ``VPD = 165000`` and
+    framed a 1 m bracket as a speck — caught by the blank-frame check.
+    """
     body = re.sub(r"^\s*include\s*<@MODEL@>;\s*$", "",
                   template.read_text(encoding="utf-8"), flags=re.MULTILINE)
-    text = (f"// {template.name} × {model.name}\n{model_source}\n"
-            f"/* ===== 段落驱动 ===== */\n{body}")
+    text = instantiate_source(template.name, model.name, inline_model(model), body, defines)
     target.write_text(text, encoding="utf-8")
     return text
 
@@ -66,7 +74,12 @@ def main() -> int:
         if not ok:
             entry["error"] = error[-400:]
         if args.render and template.stem == f"seg_{args.render}":
+            # 相机默认值走与 storyboard 相同的通道：先按模型尺寸算 VPD/VPT_Z，
+            # 再带着它们重新实例化（顺带剥离模板里硬编码的 $vpd 保护行），
+            # 否则模板默认值会把自适应机位顶掉，小模型渲染成一点。
             defines = camera_defaults(generated, {}, settings)
+            if defines:
+                instantiate(template, model, generated, defines)
             rendered = render_views(generated, work / args.render, [], defines, settings,
                                     animate=args.frames)
             entry["render"] = {"ok": rendered.get("ok"), "frames": rendered.get("frames"),
